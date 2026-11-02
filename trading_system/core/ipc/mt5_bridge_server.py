@@ -271,7 +271,7 @@ class MT5BridgeServer:
                 bot = float(z.get("low", z.get("bottom", 0.0)))
                 z_type = z.get("type", "DEMAND")
                 state = z.get("state", "FRESH")
-                if top > 0 and bot > 0:
+                if top > 0 and bot > 0 and state != "MITIGATED":
                     zones_payload.append({
                         "type": z_type,
                         "top": top,
@@ -279,6 +279,57 @@ class MT5BridgeServer:
                         "state": state,
                         "timeframe": tf_key,
                     })
+
+        # Determine reference price for strict proximity filtering
+        ref_price = ctx.bid if ctx.bid > 0 else (ctx.ask if ctx.ask > 0 else 0.0)
+        if ref_price == 0.0:
+            for tf_candidate in ("M15", "H1", "H4", "D1"):
+                df_c = tf_data.get(tf_candidate)
+                if df_c is not None and not df_c.empty:
+                    ref_price = float(df_c["close"].iloc[-1])
+                    break
+
+        # Filter levels to strictly the nearest 3 above (Resistances) and 3 below (Supports)
+        # to ensure ZERO chart clutter on MT5
+        filtered_levels: list[dict[str, Any]] = []
+        if ref_price > 0.0 and levels_payload:
+            # Deduplicate levels that are within 0.15% of each other
+            unique_levels: list[dict[str, Any]] = []
+            for lvl in levels_payload:
+                p = lvl["price"]
+                if not any(abs(p - u["price"]) / max(ref_price, 1e-6) < 0.0015 for u in unique_levels):
+                    unique_levels.append(lvl)
+
+            above = [l for l in unique_levels if l["price"] > ref_price]
+            below = [l for l in unique_levels if l["price"] < ref_price]
+
+            above.sort(key=lambda x: x["price"])                   # Closest above price first
+            below.sort(key=lambda x: x["price"], reverse=True)     # Closest below price first
+
+            clean_above = above[:3]
+            clean_below = below[:3]
+
+            for l in clean_above:
+                l["type"] = "RESISTANCE"
+            for l in clean_below:
+                l["type"] = "SUPPORT"
+
+            filtered_levels = clean_above + clean_below
+        else:
+            filtered_levels = levels_payload[:6]
+
+        # Filter Supply/Demand zones: only active unmitigated zones (max 2 supply above, 2 demand below)
+        filtered_zones: list[dict[str, Any]] = []
+        if ref_price > 0.0 and zones_payload:
+            supplies = [z for z in zones_payload if z["type"] == "SUPPLY" and z.get("bottom", 0.0) >= ref_price]
+            demands = [z for z in zones_payload if z["type"] == "DEMAND" and z.get("top", 0.0) <= ref_price]
+
+            supplies.sort(key=lambda x: x["bottom"])              # Closest supply above
+            demands.sort(key=lambda x: x["top"], reverse=True)    # Closest demand below
+
+            filtered_zones = supplies[:2] + demands[:2]
+        else:
+            filtered_zones = zones_payload[:4]
 
         # 4. Formulate Actionable Trade Plan (if setup is valid)
         trade_plan_payload = None
@@ -297,8 +348,8 @@ class MT5BridgeServer:
             timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             overall_bias=synthesis.get("overall_bias", "NEUTRAL"),
             bias_strength=round(float(synthesis.get("bias_strength", 0.0)), 2),
-            levels=levels_payload[:10],  # Top 10 cleanest levels
-            zones=zones_payload[:6],    # Top 6 most relevant zones
+            levels=filtered_levels,  # Strictly nearest 3 above & 3 below
+            zones=filtered_zones,    # Strictly nearest 2 supply & 2 demand
             trade_plan=trade_plan_payload,
             candle_expectation=synthesis.get("narrative", ""),
             status="SUCCESS",

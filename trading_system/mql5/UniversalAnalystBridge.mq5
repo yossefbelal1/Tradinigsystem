@@ -520,21 +520,23 @@ void ProcessAnalysisJson(const string &json)
    // Draw Trade Plan Blueprint lines
    if(InpDrawBlueprint && is_valid && dir != "NEUTRAL" && dir != "" && entry > 0.0)
    {
-      DrawHLine(AGY_DRAW_PREFIX + "BP_ENTRY", entry, InpEntryColor, STYLE_SOLID, 2, 
-                StringFormat("ENTRY (%s @ %.5f)", dir, entry));
-      DrawHLine(AGY_DRAW_PREFIX + "BP_SL", sl, InpSLColor, STYLE_SOLID, 2, 
-                StringFormat("STOP LOSS (%.5f)", sl));
-      DrawHLine(AGY_DRAW_PREFIX + "BP_TP1", tp1, InpTPColor, STYLE_SOLID, 2, 
-                StringFormat("TAKE PROFIT 1 (1:%.1f | %.5f)", rr, tp1));
+      DrawRayLine(AGY_DRAW_PREFIX + "BP_ENTRY", entry, InpEntryColor, STYLE_SOLID, 2, 
+                  StringFormat("ENTRY (%s @ %.5f)", dir, entry));
+      DrawRayLine(AGY_DRAW_PREFIX + "BP_SL", sl, InpSLColor, STYLE_SOLID, 2, 
+                  StringFormat("STOP LOSS (%.5f)", sl));
+      DrawRayLine(AGY_DRAW_PREFIX + "BP_TP1", tp1, InpTPColor, STYLE_SOLID, 2, 
+                  StringFormat("TAKE PROFIT 1 (1:%.1f | %.5f)", rr, tp1));
       if(tp2 > 0.0)
       {
-         DrawHLine(AGY_DRAW_PREFIX + "BP_TP2", tp2, clrMediumSeaGreen, STYLE_DOT, 1, 
-                   StringFormat("TAKE PROFIT 2 (%.5f)", tp2));
+         DrawRayLine(AGY_DRAW_PREFIX + "BP_TP2", tp2, clrMediumSeaGreen, STYLE_DOT, 1, 
+                     StringFormat("TAKE PROFIT 2 (%.5f)", tp2));
       }
    }
 
    // Format Comprehensive On-Chart Comment HUD
-   string hud = "====================================================================\n"
+   // (Prepend newlines to prevent overlapping top-left UI buttons)
+   string hud = "\n\n\n\n"
+              + "====================================================================\n"
               + StringFormat("  [UNIVERSAL AI TRADING ANALYST - %s (%s)]\n", _Symbol, GetTimeframeName(_Period))
               + "====================================================================\n"
               + StringFormat("  OVERALL MTF BIAS : %s (Strength: %.0f%%)\n", overall_bias, bias_strength * 100.0)
@@ -596,9 +598,9 @@ void RenderLevelsFromJson(const string &json)
       if(price > 0.0)
       {
          string name = StringFormat("%sSR_%d_%s", AGY_DRAW_PREFIX, idx, tf);
-         color clr   = (type == "RESISTANCE") ? InpResistanceColor : InpSupportColor;
+         color clr   = (type == "RESISTANCE" || StringFind(type, "RES") >= 0) ? InpResistanceColor : InpSupportColor;
          string desc = StringFormat("%s %s @ %.5f", tf, type, price);
-         DrawHLine(name, price, clr, STYLE_DASH, 1, desc);
+         DrawRayLine(name, price, clr, STYLE_DASH, 1, desc);
          idx++;
       }
       pos = item_end + 1;
@@ -621,7 +623,7 @@ void RenderZonesFromJson(const string &json)
 
    int pos = 0;
    int idx = 0;
-   while(pos < StringLen(array_str) && idx < 15)
+   while(pos < StringLen(array_str) && idx < 6)
    {
       int item_start = StringFind(array_str, "{", pos);
       if(item_start < 0) break;
@@ -643,6 +645,28 @@ void RenderZonesFromJson(const string &json)
          idx++;
       }
       pos = item_end + 1;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Helper: Draw Ray Horizontal Line on Chart (Recent 35 bars to right)
+//+------------------------------------------------------------------+
+void DrawRayLine(string name, double price, color clr, ENUM_LINE_STYLE style, int width, string desc)
+{
+   ObjectDelete(0, name);
+   datetime t_start = iTime(_Symbol, _Period, MathMin(iBars(_Symbol, _Period) - 1, 35));
+   datetime t_end   = TimeCurrent() + (PeriodSeconds(_Period) * 15);
+
+   if(ObjectCreate(0, name, OBJ_TREND, 0, t_start, price, t_end, price))
+   {
+      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+      ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
+      ObjectSetString(0, name, OBJPROP_TEXT, desc);
+      ObjectSetString(0, name, OBJPROP_TOOLTIP, desc);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
    }
 }
 

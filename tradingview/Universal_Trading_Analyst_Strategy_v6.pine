@@ -1,0 +1,501 @@
+//@version=6
+strategy("Universal Trading Intelligence Strategy [Pine v6]", shorttitle="AGY_Strategy_v6", overlay=true, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=1.0, currency=currency.USD, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+//+----------------------------------------------------------------------------------------------------+
+//|                                                                                                    |
+//|                 PROFESSIONAL MULTI-ASSET TECHNICAL ANALYSIS STRATEGY (PINE SCRIPT v6)              |
+//|                                                                                                    |
+//|  Quantitative Validation Engine for the Universal Trading Intelligence System                      |
+//|  Implements the exact same analytical rules as the Indicator for backtesting and edge verification: |
+//|  - Fractals + ATR Dynamic Clustering with Polarity Flips & Auto-Deletion                           |
+//|  - Displacement-based Supply & Demand with Auto-Mitigation Cleanup                                 |
+//|  - Market Structure: Swing BOS & Trend-Reversal CHoCH                                              |
+//|  - Top-Down Multi-Timeframe Bias Synthesis (D1, H4, H1)                                            |
+//|  - Contextual Price Action Gating (Pin Bar, Engulfing, Fakey Reversals)                             |
+//|  - Partial Profit Scaling: TP1 at 1.5R (50%), TP2 at 2.5R (50%), Break-Even Stop Management        |
+//|                                                                                                    |
+//+----------------------------------------------------------------------------------------------------+
+
+// ====================================================================================================
+// 1. INPUT CONFIGURATIONS
+// ====================================================================================================
+
+// --- Group: Strategy Risk Parameters ---
+grp_risk        = "=== STRATEGY RISK & CAPITAL MANAGEMENT ==="
+inp_risk_pct    = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=3.0, step=0.1, group=grp_risk)
+inp_min_rr_tp1  = input.float(1.5, "Risk-Reward TP1 (Scale 50%)", minval=1.0, maxval=3.0, step=0.1, group=grp_risk)
+inp_min_rr_tp2  = input.float(2.5, "Risk-Reward TP2 (Scale 50%)", minval=1.5, maxval=5.0, step=0.1, group=grp_risk)
+inp_move_be     = input.bool(true, "Move Stop-Loss to Break-Even at TP1", group=grp_risk)
+
+// --- Group: Support & Resistance ---
+grp_sr          = "=== SUPPORT & RESISTANCE (FRACTALS + ATR) ==="
+inp_show_sr     = input.bool(true, "Draw Support & Resistance Zones", group=grp_sr)
+inp_fr_left     = input.int(2, "Fractal Left Bars", minval=1, maxval=10, group=grp_sr)
+inp_fr_right    = input.int(2, "Fractal Right Bars", minval=1, maxval=10, group=grp_sr)
+inp_atr_len     = input.int(14, "ATR Period for Clustering", minval=1, group=grp_sr)
+inp_cluster_mult= input.float(0.35, "ATR Cluster Tolerance Multiplier", minval=0.1, maxval=2.0, step=0.05, group=grp_sr)
+inp_auto_purge  = input.bool(true, "Auto-Delete Violated Levels", group=grp_sr)
+inp_max_sr_show = input.int(3, "Max Active Levels Above/Below Price", minval=1, maxval=6, group=grp_sr)
+
+// --- Group: Supply & Demand ---
+grp_sd          = "=== SUPPLY & DEMAND (ORDER BLOCKS) ==="
+inp_show_sd     = input.bool(true, "Draw Supply & Demand Zones", group=grp_sd)
+inp_disp_mult   = input.float(1.5, "Displacement Candle Min Body (x ATR)", minval=1.0, maxval=3.0, step=0.1, group=grp_sd)
+inp_purge_mit   = input.bool(true, "Auto-Delete Mitigated Zones", group=grp_sd)
+
+// --- Group: Market Structure ---
+grp_struct      = "=== MARKET STRUCTURE (BOS & CHOCH) ==="
+inp_str_len     = input.int(5, "Structure Swing Lookback", minval=2, maxval=20, group=grp_struct)
+inp_close_break = input.bool(true, "Require Candle Close for Break", group=grp_struct)
+
+// --- Group: Contextual Price Action ---
+grp_pa          = "=== CONTEXTUAL PRICE ACTION ==="
+inp_gate_pa     = input.bool(true, "Gate PA Signals (Only at S/R or S/D Zones)", group=grp_pa)
+inp_pin_wick    = input.float(66.7, "Pin Bar Min Wick (%)", minval=50.0, maxval=85.0, step=1.0, group=grp_pa)
+inp_pin_body    = input.float(33.3, "Pin Bar Max Body (%)", minval=15.0, maxval=45.0, step=1.0, group=grp_pa)
+
+// --- Group: Backtest Date Filter ---
+grp_time        = "=== BACKTEST TIME WINDOW ==="
+inp_use_date    = input.bool(false, "Enable Date Range Filter", group=grp_time)
+inp_start_date  = input.time(timestamp("2024-01-01 00:00:00"), "Start Date", group=grp_time)
+inp_end_date    = input.time(timestamp("2027-01-01 00:00:00"), "End Date", group=grp_time)
+in_date_range   = not inp_use_date or (time >= inp_start_date and time <= inp_end_date)
+
+// ====================================================================================================
+// 2. USER DEFINED TYPES & DATA STRUCTURES
+// ====================================================================================================
+
+type SRZone
+    box     bx
+    label   lbl
+    float   price
+    float   top
+    float   bottom
+    int     touches
+    string  role        // "SUPPORT", "RESISTANCE", "FLIPPED_TO_RESISTANCE", "FLIPPED_TO_SUPPORT"
+    int     start_bar
+    bool    is_active
+
+type SDZone
+    box     bx
+    label   lbl
+    float   top
+    float   bottom
+    string  kind        // "SUPPLY", "DEMAND"
+    string  state       // "FRESH", "TESTED", "MITIGATED"
+    int     start_bar
+    bool    is_active
+
+var SRZone[] g_sr_zones = array.new<SRZone>()
+var SDZone[] g_sd_zones = array.new<SDZone>()
+
+cur_atr = ta.atr(inp_atr_len)
+atr_safe = math.max(cur_atr, syminfo.mintick * 10)
+cluster_tolerance = atr_safe * inp_cluster_mult
+
+// ====================================================================================================
+// 3. FRACTALS + ATR CLUSTERING WITH POLARITY FLIPS & AUTO-PRUNING
+// ====================================================================================================
+
+f_ph = ta.pivothigh(high, inp_fr_left, inp_fr_right)
+f_pl = ta.pivotlow(low, inp_fr_left, inp_fr_right)
+
+if not na(f_ph)
+    float pivot_val = f_ph
+    int pivot_bar   = bar_index - inp_fr_right
+    bool merged     = false
+    
+    if array.size(g_sr_zones) > 0
+        for i = 0 to array.size(g_sr_zones) - 1
+            SRZone z = array.get(g_sr_zones, i)
+            if z.is_active and math.abs(pivot_val - z.price) <= cluster_tolerance
+                z.touches   += 1
+                z.price     := (z.price * (z.touches - 1) + pivot_val) / z.touches
+                z.top       := math.max(z.top, pivot_val)
+                z.bottom    := math.min(z.bottom, pivot_val - (atr_safe * 0.15))
+                if inp_show_sr
+                    box.set_top(z.bx, z.top)
+                    box.set_bottom(z.bx, z.bottom)
+                    box.set_right(z.bx, bar_index + 15)
+                merged := true
+                break
+                
+    if not merged
+        float top_p = pivot_val
+        float bot_p = pivot_val - (atr_safe * 0.15)
+        box bx = na
+        label lb = na
+        if inp_show_sr
+            bx := box.new(left=pivot_bar, top=top_p, right=bar_index + 15, bottom=bot_p, 
+                          bgcolor=color.new(#ff5533, 75), border_color=color.new(#ff5533, 30), border_width=1)
+            lb := label.new(x=bar_index + 15, y=pivot_val, text="RES", style=label.style_none, textcolor=color.coral, size=size.tiny)
+        SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
+                                  role="RESISTANCE", start_bar=pivot_bar, is_active=true)
+        array.push(g_sr_zones, new_z)
+
+if not na(f_pl)
+    float pivot_val = f_pl
+    int pivot_bar   = bar_index - inp_fr_right
+    bool merged     = false
+    
+    if array.size(g_sr_zones) > 0
+        for i = 0 to array.size(g_sr_zones) - 1
+            SRZone z = array.get(g_sr_zones, i)
+            if z.is_active and math.abs(pivot_val - z.price) <= cluster_tolerance
+                z.touches   += 1
+                z.price     := (z.price * (z.touches - 1) + pivot_val) / z.touches
+                z.top       := math.max(z.top, pivot_val + (atr_safe * 0.15))
+                z.bottom    := math.min(z.bottom, pivot_val)
+                if inp_show_sr
+                    box.set_top(z.bx, z.top)
+                    box.set_bottom(z.bx, z.bottom)
+                    box.set_right(z.bx, bar_index + 15)
+                merged := true
+                break
+                
+    if not merged
+        float top_p = pivot_val + (atr_safe * 0.15)
+        float bot_p = pivot_val
+        box bx = na
+        label lb = na
+        if inp_show_sr
+            bx := box.new(left=pivot_bar, top=top_p, right=bar_index + 15, bottom=bot_p, 
+                          bgcolor=color.new(#00aaff, 75), border_color=color.new(#00aaff, 30), border_width=1)
+            lb := label.new(x=bar_index + 15, y=pivot_val, text="SUP", style=label.style_none, textcolor=color.dodgerblue, size=size.tiny)
+        SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
+                                  role="SUPPORT", start_bar=pivot_bar, is_active=true)
+        array.push(g_sr_zones, new_z)
+
+// Bar-Close Polarity Flips & Auto-Deletion of Violated Levels
+if barstate.isconfirmed and array.size(g_sr_zones) > 0
+    for i = array.size(g_sr_zones) - 1 to 0
+        SRZone z = array.get(g_sr_zones, i)
+        if z.is_active
+            if inp_show_sr and not na(z.bx)
+                box.set_right(z.bx, bar_index + 15)
+                label.set_x(z.lbl, bar_index + 15)
+
+            // Support broken -> Polarity Flip to Resistance
+            if z.role == "SUPPORT"
+                if close < z.bottom
+                    z.role := "FLIPPED_TO_RESISTANCE"
+                    if inp_show_sr and not na(z.bx)
+                        box.set_bgcolor(z.bx, color.new(#ff7700, 75))
+                        box.set_border_color(z.bx, color.new(#ff7700, 30))
+                        label.set_text(z.lbl, "FLIP RES")
+
+            // Resistance broken -> Polarity Flip to Support
+            else if z.role == "RESISTANCE"
+                if close > z.top
+                    z.role := "FLIPPED_TO_SUPPORT"
+                    if inp_show_sr and not na(z.bx)
+                        box.set_bgcolor(z.bx, color.new(#00cc88, 75))
+                        box.set_border_color(z.bx, color.new(#00cc88, 30))
+                        label.set_text(z.lbl, "FLIP SUP")
+
+            // Flipped Resistance Disrespected -> AUTO DELETE IMMEDIATELY
+            else if z.role == "FLIPPED_TO_RESISTANCE"
+                if inp_auto_purge and (close > z.top + (atr_safe * 0.25))
+                    if not na(z.bx)
+                        box.delete(z.bx)
+                        label.delete(z.lbl)
+                    z.is_active := false
+                    array.remove(g_sr_zones, i)
+
+            // Flipped Support Disrespected -> AUTO DELETE IMMEDIATELY
+            else if z.role == "FLIPPED_TO_SUPPORT"
+                if inp_auto_purge and (close < z.bottom - (atr_safe * 0.25))
+                    if not na(z.bx)
+                        box.delete(z.bx)
+                        label.delete(z.lbl)
+                    z.is_active := false
+                    array.remove(g_sr_zones, i)
+
+// Dynamic Proximity Filter (Show Only Nearest N Above/Below Price)
+if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
+    for i = 0 to array.size(g_sr_zones) - 1
+        SRZone z = array.get(g_sr_zones, i)
+        if z.is_active and not na(z.bx)
+            int closer_count = 0
+            if z.price > close
+                for j = 0 to array.size(g_sr_zones) - 1
+                    SRZone other = array.get(g_sr_zones, j)
+                    if other.is_active and other.price > close and other.price < z.price
+                        closer_count += 1
+                if closer_count < inp_max_sr_show
+                    color base_c = (z.role == "FLIPPED_TO_RESISTANCE") ? color.new(#ff7700, 75) : color.new(#ff5533, 75)
+                    box.set_bgcolor(z.bx, base_c)
+                    box.set_border_color(z.bx, color.new(base_c, 30))
+                    label.set_textcolor(z.lbl, color.coral)
+                else
+                    box.set_bgcolor(z.bx, color.new(color.white, 100))
+                    box.set_border_color(z.bx, color.new(color.white, 100))
+                    label.set_textcolor(z.lbl, color.new(color.white, 100))
+            else
+                for j = 0 to array.size(g_sr_zones) - 1
+                    SRZone other = array.get(g_sr_zones, j)
+                    if other.is_active and other.price < close and other.price > z.price
+                        closer_count += 1
+                if closer_count < inp_max_sr_show
+                    color base_c = (z.role == "FLIPPED_TO_SUPPORT") ? color.new(#00cc88, 75) : color.new(#00aaff, 75)
+                    box.set_bgcolor(z.bx, base_c)
+                    box.set_border_color(z.bx, color.new(base_c, 30))
+                    label.set_textcolor(z.lbl, color.dodgerblue)
+                else
+                    box.set_bgcolor(z.bx, color.new(color.white, 100))
+                    box.set_border_color(z.bx, color.new(color.white, 100))
+                    label.set_textcolor(z.lbl, color.new(color.white, 100))
+
+// ====================================================================================================
+// 4. SUPPLY & DEMAND DISPLACEMENT & AUTO-MITIGATION
+// ====================================================================================================
+
+candle_body = math.abs(close - open)
+is_displacement = candle_body >= (atr_safe * inp_disp_mult)
+
+if is_displacement
+    if close > open and close[1] < open[1]
+        float dem_top = math.max(open[1], close[1])
+        float dem_bot = low[1]
+        box bx = na
+        label lb = na
+        if inp_show_sd
+            bx := box.new(left=bar_index - 1, top=dem_top, right=bar_index + 20, bottom=dem_bot,
+                          bgcolor=color.new(#008844, 75), border_color=color.new(#008844, 20), border_width=1)
+            lb := label.new(x=bar_index + 20, y=(dem_top + dem_bot)/2, text="DEMAND", style=label.style_none, textcolor=color.green, size=size.tiny)
+        SDZone new_sd = SDZone.new(bx=bx, lbl=lb, top=dem_top, bottom=dem_bot, kind="DEMAND", state="FRESH", start_bar=bar_index - 1, is_active=true)
+        array.push(g_sd_zones, new_sd)
+        
+    else if close < open and close[1] > open[1]
+        float sup_top = high[1]
+        float sup_bot = math.min(open[1], close[1])
+        box bx = na
+        label lb = na
+        if inp_show_sd
+            bx := box.new(left=bar_index - 1, top=sup_top, right=bar_index + 20, bottom=sup_bot,
+                          bgcolor=color.new(#881122, 75), border_color=color.new(#881122, 20), border_width=1)
+            lb := label.new(x=bar_index + 20, y=(sup_top + sup_bot)/2, text="SUPPLY", style=label.style_none, textcolor=color.red, size=size.tiny)
+        SDZone new_sd = SDZone.new(bx=bx, lbl=lb, top=sup_top, bottom=sup_bot, kind="SUPPLY", state="FRESH", start_bar=bar_index - 1, is_active=true)
+        array.push(g_sd_zones, new_sd)
+
+if barstate.isconfirmed and array.size(g_sd_zones) > 0
+    for i = array.size(g_sd_zones) - 1 to 0
+        SDZone sd = array.get(g_sd_zones, i)
+        if sd.is_active
+            if sd.kind == "DEMAND"
+                if low <= sd.bottom
+                    if inp_purge_mit
+                        if not na(sd.bx)
+                            box.delete(sd.bx), label.delete(sd.lbl)
+                        sd.is_active := false
+                        array.remove(g_sd_zones, i)
+                    else
+                        sd.state := "MITIGATED"
+                else if low <= sd.top and sd.state == "FRESH"
+                    sd.state := "TESTED"
+            else if sd.kind == "SUPPLY"
+                if high >= sd.top
+                    if inp_purge_mit
+                        if not na(sd.bx)
+                            box.delete(sd.bx), label.delete(sd.lbl)
+                        sd.is_active := false
+                        array.remove(g_sd_zones, i)
+                    else
+                        sd.state := "MITIGATED"
+                else if high >= sd.bottom and sd.state == "FRESH"
+                    sd.state := "TESTED"
+
+// ====================================================================================================
+// 5. MARKET STRUCTURE (BOS & CHOCH) & TOP-DOWN MTF BIAS
+// ====================================================================================================
+
+var float last_sh = na
+var float last_sl = na
+var int   market_trend = 0 // 1 = Bullish, -1 = Bearish, 0 = Neutral
+
+sh = ta.pivothigh(high, inp_str_len, inp_str_len)
+sl = ta.pivotlow(low, inp_str_len, inp_str_len)
+
+if not na(sh)
+    last_sh := sh
+if not na(sl)
+    last_sl := sl
+
+break_price_high = inp_close_break ? close : high
+break_price_low  = inp_close_break ? close : low
+
+if not na(last_sh) and break_price_high > last_sh and (inp_close_break ? close[1] <= last_sh : high[1] <= last_sh)
+    market_trend := 1
+
+if not na(last_sl) and break_price_low < last_sl and (inp_close_break ? close[1] >= last_sl : low[1] >= last_sl)
+    market_trend := -1
+
+// Top-Down HTF Confirmation (Non-Repainting)
+[d1_c, d1_ema50] = request.security(syminfo.tickerid, "D", [close[1], ta.ema(close, 50)[1]], lookahead=barmerge.lookahead_off)
+[h4_c, h4_ema50] = request.security(syminfo.tickerid, "240", [close[1], ta.ema(close, 50)[1]], lookahead=barmerge.lookahead_off)
+
+d1_bias = d1_c > d1_ema50 ? 1 : (d1_c < d1_ema50 ? -1 : 0)
+h4_bias = h4_c > h4_ema50 ? 1 : (h4_c < h4_ema50 ? -1 : 0)
+overall_bias = (d1_bias * 2 + h4_bias + market_trend) >= 2 ? "BULLISH" : ((d1_bias * 2 + h4_bias + market_trend) <= -2 ? "BEARISH" : "NEUTRAL")
+
+// ====================================================================================================
+// 6. CONTEXTUAL PRICE ACTION & GATING
+// ====================================================================================================
+
+tot_range   = high - low
+body_len    = math.abs(close - open)
+upper_wick  = high - math.max(open, close)
+lower_wick  = math.min(open, close) - low
+
+f_near_support() =>
+    bool near = false
+    if array.size(g_sr_zones) > 0
+        for i = 0 to array.size(g_sr_zones) - 1
+            SRZone z = array.get(g_sr_zones, i)
+            if z.is_active and (z.role == "SUPPORT" or z.role == "FLIPPED_TO_SUPPORT")
+                if math.abs(low - z.price) <= (atr_safe * 0.5) or (low <= z.top and high >= z.bottom)
+                    near := true
+                    break
+    if not near and array.size(g_sd_zones) > 0
+        for i = 0 to array.size(g_sd_zones) - 1
+            SDZone sd = array.get(g_sd_zones, i)
+            if sd.is_active and sd.kind == "DEMAND"
+                if math.abs(low - sd.top) <= (atr_safe * 0.5) or (low <= sd.top and high >= sd.bottom)
+                    near := true
+                    break
+    near
+
+f_near_resistance() =>
+    bool near = false
+    if array.size(g_sr_zones) > 0
+        for i = 0 to array.size(g_sr_zones) - 1
+            SRZone z = array.get(g_sr_zones, i)
+            if z.is_active and (z.role == "RESISTANCE" or z.role == "FLIPPED_TO_RESISTANCE")
+                if math.abs(high - z.price) <= (atr_safe * 0.5) or (high >= z.bottom and low <= z.top)
+                    near := true
+                    break
+    if not near and array.size(g_sd_zones) > 0
+        for i = 0 to array.size(g_sd_zones) - 1
+            SDZone sd = array.get(g_sd_zones, i)
+            if sd.is_active and sd.kind == "SUPPLY"
+                if math.abs(high - sd.bottom) <= (atr_safe * 0.5) or (high >= sd.bottom and low <= sd.top)
+                    near := true
+                    break
+    near
+
+// Nial Fuller PA Formulations
+is_bull_pin = (tot_range > 0) and ((lower_wick / tot_range) >= (inp_pin_wick / 100.0)) and ((body_len / tot_range) <= (inp_pin_body / 100.0)) and (close >= low + (tot_range * 0.55))
+is_bear_pin = (tot_range > 0) and ((upper_wick / tot_range) >= (inp_pin_wick / 100.0)) and ((body_len / tot_range) <= (inp_pin_body / 100.0)) and (close <= high - (tot_range * 0.55))
+
+is_bull_engulf = (close[1] < open[1]) and (close > open) and (open <= close[1]) and (close >= open[1])
+is_bear_engulf = (close[1] > open[1]) and (close < open) and (open >= close[1]) and (close <= open[1])
+
+is_inside_bar = (high[1] <= high[2]) and (low[1] >= low[2])
+is_bull_fakey = is_inside_bar and (low < low[1]) and (close > high[1] or close > close[2])
+is_bear_fakey = is_inside_bar and (high > high[1]) and (close < low[1] or close < close[2])
+
+valid_long_setup  = (is_bull_pin or is_bull_engulf or is_bull_fakey) and (not inp_gate_pa or f_near_support()) and (overall_bias == "BULLISH" or market_trend == 1)
+valid_short_setup = (is_bear_pin or is_bear_engulf or is_bear_fakey) and (not inp_gate_pa or f_near_resistance()) and (overall_bias == "BEARISH" or market_trend == -1)
+
+// ====================================================================================================
+// 7. STRATEGY EXECUTION ENGINE & POSITION SIZING
+// ====================================================================================================
+
+var float entry_price = 0.0
+var float stop_loss   = 0.0
+var float tp1_price   = 0.0
+var float tp2_price   = 0.0
+var bool  tp1_hit     = false
+
+if barstate.isconfirmed and in_date_range
+    // Long Order Entry
+    if valid_long_setup and strategy.position_size == 0
+        entry_price := close
+        stop_loss   := low - (atr_safe * 0.3)
+        float risk_d = entry_price - stop_loss
+        if risk_d > 0
+            tp1_price := entry_price + (risk_d * inp_min_rr_tp1)
+            tp2_price := entry_price + (risk_d * inp_min_rr_tp2)
+            tp1_hit   := false
+
+            // Dynamic fractional contracts based on 1% equity risk
+            float risk_usd = strategy.equity * (inp_risk_pct / 100.0)
+            float point_val = syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
+            float qty_contracts = math.max(1.0, math.round(risk_usd / (risk_d * point_val)))
+
+            strategy.entry("Long", strategy.long, qty=qty_contracts)
+            strategy.exit("TP1_L", "Long", qty_percent=50, limit=tp1_price, stop=stop_loss)
+            strategy.exit("TP2_L", "Long", qty_percent=100, limit=tp2_price, stop=stop_loss)
+
+    // Short Order Entry
+    else if valid_short_setup and strategy.position_size == 0
+        entry_price := close
+        stop_loss   := high + (atr_safe * 0.3)
+        float risk_d = stop_loss - entry_price
+        if risk_d > 0
+            tp1_price := entry_price - (risk_d * inp_min_rr_tp1)
+            tp2_price := entry_price - (risk_d * inp_min_rr_tp2)
+            tp1_hit   := false
+
+            float risk_usd = strategy.equity * (inp_risk_pct / 100.0)
+            float point_val = syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
+            float qty_contracts = math.max(1.0, math.round(risk_usd / (risk_d * point_val)))
+
+            strategy.entry("Short", strategy.short, qty=qty_contracts)
+            strategy.exit("TP1_S", "Short", qty_percent=50, limit=tp1_price, stop=stop_loss)
+            strategy.exit("TP2_S", "Short", qty_percent=100, limit=tp2_price, stop=stop_loss)
+
+// Manage Break-Even Stop upon reaching TP1
+if strategy.position_size > 0 and inp_move_be
+    if high >= tp1_price and not tp1_hit
+        tp1_hit := true
+        strategy.exit("TP2_L_BE", "Long", qty_percent=100, limit=tp2_price, stop=entry_price)
+
+if strategy.position_size < 0 and inp_move_be
+    if low <= tp1_price and not tp1_hit
+        tp1_hit := true
+        strategy.exit("TP2_S_BE", "Short", qty_percent=100, limit=tp2_price, stop=entry_price)
+
+// ====================================================================================================
+// 8. QUANTITATIVE PERFORMANCE HUD TABLE (ON-CHART)
+// ====================================================================================================
+
+var table perf_tbl = table.new(position=position.bottom_right, columns=2, rows=8, 
+                               bgcolor=color.new(#11141a, 10), border_color=color.new(#2a2e39, 0), border_width=1)
+
+if barstate.islast
+    float net_profit = strategy.netprofit
+    float net_pct    = (net_profit / strategy.initial_capital) * 100.0
+    int   total_tr   = strategy.closedtrades
+    int   win_tr     = strategy.wintrades
+    float win_rate   = total_tr > 0 ? (win_tr / float(total_tr)) * 100.0 : 0.0
+    float pf         = strategy.grossprofit > 0 and strategy.grossloss > 0 ? (strategy.grossprofit / strategy.grossloss) : 0.0
+    float max_dd_usd = strategy.max_drawdown
+    float max_dd_pct = strategy.max_drawdown_percent
+
+    table.cell(perf_tbl, 0, 0, "SYSTEM PERFORMANCE", bgcolor=color.new(#1e222d, 0), text_color=color.white, text_size=size.small)
+    table.cell(perf_tbl, 1, 0, syminfo.ticker + " (" + timeframe.period + ")", bgcolor=color.new(#1e222d, 0), text_color=color.aqua, text_size=size.small)
+
+    table.cell(perf_tbl, 0, 1, "Net Profit", text_color=color.silver, text_size=size.small)
+    table.cell(perf_tbl, 1, 1, "$" + str.tostring(net_profit, "#,###.##") + " (" + str.tostring(net_pct, "+#.##") + "%)", 
+               text_color=net_profit >= 0 ? color.lime : color.red, text_size=size.small)
+
+    table.cell(perf_tbl, 0, 2, "Win Rate", text_color=color.silver, text_size=size.small)
+    table.cell(perf_tbl, 1, 2, str.tostring(win_rate, "#.#") + "% (" + str.tostring(win_tr) + "/" + str.tostring(total_tr) + ")", 
+               text_color=win_rate >= 50.0 ? color.lime : color.yellow, text_size=size.small)
+
+    table.cell(perf_tbl, 0, 3, "Profit Factor", text_color=color.silver, text_size=size.small)
+    table.cell(perf_tbl, 1, 3, str.tostring(pf, "#.##"), text_color=pf >= 1.5 ? color.lime : (pf >= 1.0 ? color.yellow : color.red), text_size=size.small)
+
+    table.cell(perf_tbl, 0, 4, "Max Drawdown", text_color=color.silver, text_size=size.small)
+    table.cell(perf_tbl, 1, 4, "$" + str.tostring(max_dd_usd, "#,###.##") + " (" + str.tostring(max_dd_pct, "#.##") + "%)", 
+               text_color=max_dd_pct <= 5.0 ? color.lime : (max_dd_pct <= 10.0 ? color.orange : color.red), text_size=size.small)
+
+    table.cell(perf_tbl, 0, 5, "Total Trades", text_color=color.silver, text_size=size.small)
+    table.cell(perf_tbl, 1, 5, str.tostring(total_tr), text_color=color.white, text_size=size.small)
+
+    table.cell(perf_tbl, 0, 6, "Current Equity", text_color=color.silver, text_size=size.small)
+    table.cell(perf_tbl, 1, 6, "$" + str.tostring(strategy.equity, "#,###.##"), text_color=color.aqua, text_size=size.small)
+
+    table.cell(perf_tbl, 0, 7, "Model Status", text_color=color.gray, text_size=size.tiny)
+    table.cell(perf_tbl, 1, 7, "PINE v6 BACKTEST ENGINE", text_color=color.gray, text_size=size.tiny)
