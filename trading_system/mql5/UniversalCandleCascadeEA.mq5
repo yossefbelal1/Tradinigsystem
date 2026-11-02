@@ -52,6 +52,8 @@ input int               InpMaxTradesPerDay    = 1;                   // Max Trad
 
 input group "=== 2. Multi-Timeframe Structure & Breakout Rules ==="
 input bool              InpRequireW1Confluence= true;                // Require W1 Candle Direction Alignment
+input bool              InpRequireD1Trend     = true;                // Require D1 20 EMA Trend Alignment
+input bool              InpRequireCandleColor = true;                // Require Candle Color Rejection (Red for Sell, Green for Buy)
 input int               InpH4SwingBars        = 2;                   // H4 Swing Fractal Radius (2 = 5-bar swing)
 input int               InpH4HistoryBars      = 120;                 // H4 History Lookback Bars for Swings
 input double            InpRetestTolerancePoints = 180.0;            // Retest Tolerance Points (180 pts = $1.8 on Gold, 18 pts on Nas)
@@ -71,6 +73,8 @@ input double            InpMaxSpreadPoints    = 500.0;               // Max Allo
 
 input group "=== 5. Prop Firm Guardian ==="
 input double            InpMaxDailyLossPct    = 4.0;                 // Max Daily Drawdown Circuit Breaker (4.0%)
+input int               InpMaxWeeklyLosses    = 2;                   // Max Allowed Losses per Week (Circuit Breaker)
+input double            InpMaxMonthlyLossPct  = 3.0;                 // Max Monthly Loss % before Pausing (FundingPips Shield)
 input bool              InpShowDashboard      = false;               // Show Visual Dashboard
 input bool              InpDebugLog           = false;               // Diagnostic Logging
 
@@ -353,7 +357,7 @@ double CalculateLotSize(double slDistanceDollars)
    if(stepLot > 0)
       rawLots = MathFloor(rawLots / stepLot) * stepLot;
 
-   rawLots = MathMax(minLot, MathMin(maxLot, rawLots));
+   rawLots = MathMax(minLot, MathMin(MathMin(maxLot, 3.0), rawLots));
    return rawLots;
 }
 
@@ -445,6 +449,30 @@ int CountTotalPositions()
    return count;
 }
 
+
+//+------------------------------------------------------------------+
+//| Get D1 20 EMA Trend Alignment (strictly from closed D1 bar)       |
+//+------------------------------------------------------------------+
+void GetD1Trend(bool &d1_bull, bool &d1_bear)
+{
+   d1_bull = false;
+   d1_bear = false;
+   int hMA = iMA(_Symbol, PERIOD_D1, 20, 0, MODE_EMA, PRICE_CLOSE);
+   if(hMA == INVALID_HANDLE) return;
+
+   double maVal[1];
+   if(CopyBuffer(hMA, 0, 1, 1, maVal) >= 1)
+   {
+      MqlRates dRates[1];
+      if(CopyRates(_Symbol, PERIOD_D1, 1, 1, dRates) >= 1)
+      {
+         if(dRates[0].close > maVal[0]) d1_bull = true;
+         else if(dRates[0].close < maVal[0]) d1_bear = true;
+      }
+   }
+   IndicatorRelease(hMA);
+}
+
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
@@ -489,6 +517,10 @@ void OnTick()
    bool w_bull = false, w_bear = false;
    GetWeeklyBias(w_bull, w_bear);
 
+   bool d1_bull = false, d1_bear = false;
+   if(InpRequireD1Trend)
+      GetD1Trend(d1_bull, d1_bear);
+
    // Intraday Execution Bar (Last completed H1 bar)
    MqlRates h1_rates[];
    ArraySetAsSeries(h1_rates, true);
@@ -502,7 +534,7 @@ void OnTick()
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
    double tol = (StringFind(_Symbol, "XAU") >= 0) ? 1.80 : 25.0;
-   double slBuffer = InpSLBufferDollars;
+   double slBuffer = (StringFind(_Symbol, "XAU") >= 0) ? InpSLBufferDollars : MathMax(InpSLBufferDollars, 35.0);
 
    // 7. Check Active Zones for Break & Retest Setup
    int totalZones = ArraySize(g_zones);
@@ -516,6 +548,7 @@ void OnTick()
       if(g_zones[z].type == ZONE_BROKEN_SUPPORT_SELL)
       {
          if(InpRequireW1Confluence && !w_bear) continue;
+         if(InpRequireD1Trend && !d1_bear) continue;
 
          // Update lowest low reached by the move
          if(b_low < g_zones[z].impulse_extreme)
@@ -530,9 +563,9 @@ void OnTick()
          if(inPremium && touchedLevel)
          {
             // Retest Rejection: candle closed back below the broken level
-            if(b_close <= level)
+            if(b_close <= level && (!InpRequireCandleColor || b_close < h1_rates[0].open))
             {
-               double slPrice = b_high + slBuffer;
+               double slPrice = MathMax(g_zones[z].swing_extreme, b_high + slBuffer);
                double riskDist = slPrice - currentBid;
 
                if(riskDist > 0.5)
@@ -565,6 +598,7 @@ void OnTick()
       else if(g_zones[z].type == ZONE_BROKEN_RESIST_BUY)
       {
          if(InpRequireW1Confluence && !w_bull) continue;
+         if(InpRequireD1Trend && !d1_bull) continue;
 
          // Update highest high reached by the move
          if(b_high > g_zones[z].impulse_extreme)
@@ -579,9 +613,9 @@ void OnTick()
          if(inDiscount && touchedLevel)
          {
             // Retest Bounce: candle closed back above the broken level
-            if(b_close >= level)
+            if(b_close >= level && (!InpRequireCandleColor || b_close > h1_rates[0].open))
             {
-               double slPrice = b_low - slBuffer;
+               double slPrice = MathMin(g_zones[z].swing_extreme, b_low - slBuffer);
                double riskDist = currentAsk - slPrice;
 
                if(riskDist > 0.5)
