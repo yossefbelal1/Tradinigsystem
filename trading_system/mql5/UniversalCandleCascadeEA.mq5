@@ -395,7 +395,9 @@ void ManageOpenPositions()
                   if(halfLot >= minLot && (volume - halfLot) >= minLot)
                      m_trade.PositionClosePartial(ticket, halfLot);
 
-                  double beSL = openPrice + (20.0 * _Point);
+                  double spreadPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+                  double beBuffer = MathMax(spreadPts * 1.5 * _Point, (StringFind(_Symbol, "XAU") >= 0 ? 0.40 : 15.0 * _Point));
+                  double beSL = openPrice + beBuffer;
                   m_trade.PositionModify(ticket, beSL, m_position.TakeProfit());
                }
             }
@@ -415,7 +417,9 @@ void ManageOpenPositions()
                   if(halfLot >= minLot && (volume - halfLot) >= minLot)
                      m_trade.PositionClosePartial(ticket, halfLot);
 
-                  double beSL = openPrice - (20.0 * _Point);
+                  double spreadPts = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+                  double beBuffer = MathMax(spreadPts * 1.5 * _Point, (StringFind(_Symbol, "XAU") >= 0 ? 0.40 : 15.0 * _Point));
+                  double beSL = openPrice - beBuffer;
                   m_trade.PositionModify(ticket, beSL, m_position.TakeProfit());
                }
             }
