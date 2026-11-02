@@ -198,10 +198,8 @@ if not na(f_ph) and inp_show_sr
         // Create new Resistance level
         float top_p = pivot_val
         float bot_p = pivot_val - (atr_safe * 0.15)
-        box bx = box.new(left=pivot_bar, top=top_p, right=bar_index + 15, bottom=bot_p, 
-                         bgcolor=inp_col_res, border_color=color.new(inp_col_res, 30), border_width=1)
-        label lb = label.new(x=bar_index + 15, y=pivot_val, text="RESISTANCE (1x)", 
-                             style=label.style_none, textcolor=color.coral, size=size.small)
+        box bx = box.new(pivot_bar, top_p, bar_index + 15, bot_p, bgcolor=inp_col_res, border_color=color.new(inp_col_res, 30), border_width=1)
+        label lb = label.new(bar_index + 15, pivot_val, "RESISTANCE (1x)", style=label.style_none, textcolor=color.red, size=size.small)
         SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
                                   role="RESISTANCE", start_bar=pivot_bar, is_active=true)
         array.push(g_sr_zones, new_z)
@@ -230,10 +228,8 @@ if not na(f_pl) and inp_show_sr
         // Create new Support level
         float top_p = pivot_val + (atr_safe * 0.15)
         float bot_p = pivot_val
-        box bx = box.new(left=pivot_bar, top=top_p, right=bar_index + 15, bottom=bot_p, 
-                         bgcolor=inp_col_sup, border_color=color.new(inp_col_sup, 30), border_width=1)
-        label lb = label.new(x=bar_index + 15, y=pivot_val, text="SUPPORT (1x)", 
-                             style=label.style_none, textcolor=color.dodgerblue, size=size.small)
+        box bx = box.new(pivot_bar, top_p, bar_index + 15, bot_p, bgcolor=inp_col_sup, border_color=color.new(inp_col_sup, 30), border_width=1)
+        label lb = label.new(bar_index + 15, pivot_val, "SUPPORT (1x)", style=label.style_none, textcolor=color.blue, size=size.small)
         SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
                                   role="SUPPORT", start_bar=pivot_bar, is_active=true)
         array.push(g_sr_zones, new_z)
@@ -303,7 +299,7 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
                     color base_c = (z.role == "FLIPPED_TO_RESISTANCE") ? inp_col_flip_res : inp_col_res
                     box.set_bgcolor(z.bx, base_c)
                     box.set_border_color(z.bx, color.new(base_c, 30))
-                    label.set_textcolor(z.lbl, (z.role == "FLIPPED_TO_RESISTANCE") ? color.orange : color.coral)
+                    label.set_textcolor(z.lbl, (z.role == "FLIPPED_TO_RESISTANCE") ? color.orange : color.red)
                 else
                     // Beyond top N -> Hide box & label to keep chart pristine
                     box.set_bgcolor(z.bx, color.new(color.white, 100))
@@ -321,7 +317,7 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
                     color base_c = (z.role == "FLIPPED_TO_SUPPORT") ? inp_col_flip_sup : inp_col_sup
                     box.set_bgcolor(z.bx, base_c)
                     box.set_border_color(z.bx, color.new(base_c, 30))
-                    label.set_textcolor(z.lbl, (z.role == "FLIPPED_TO_SUPPORT") ? color.teal : color.dodgerblue)
+                    label.set_textcolor(z.lbl, (z.role == "FLIPPED_TO_SUPPORT") ? color.teal : color.blue)
                 else
                     // Beyond top N -> Hide
                     box.set_bgcolor(z.bx, color.new(color.white, 100))
@@ -622,7 +618,7 @@ if barstate.isconfirmed and inp_show_scen
         float sl_points = risk_d / syminfo.mintick
         scen_lots := math.max(0.01, math.round((risk_usd / (sl_points * point_val * syminfo.mintick)), 2))
 
-        ln_entry := line.new(bar_index, scen_entry, bar_index + 25, scen_entry, color=color.gold, width=2)
+        ln_entry := line.new(bar_index, scen_entry, bar_index + 25, scen_entry, color=color.yellow, width=2)
         ln_sl    := line.new(bar_index, scen_sl, bar_index + 25, scen_sl, color=color.red, width=2)
         ln_tp1   := line.new(bar_index, scen_tp1, bar_index + 25, scen_tp1, color=color.lime, width=2)
         ln_tp2   := line.new(bar_index, scen_tp2, bar_index + 25, scen_tp2, color=color.green, width=1, style=line.style_dashed)
@@ -643,7 +639,7 @@ if barstate.isconfirmed and inp_show_scen
         float sl_points = risk_d / syminfo.mintick
         scen_lots := math.max(0.01, math.round((risk_usd / (sl_points * point_val * syminfo.mintick)), 2))
 
-        ln_entry := line.new(bar_index, scen_entry, bar_index + 25, scen_entry, color=color.gold, width=2)
+        ln_entry := line.new(bar_index, scen_entry, bar_index + 25, scen_entry, color=color.yellow, width=2)
         ln_sl    := line.new(bar_index, scen_sl, bar_index + 25, scen_sl, color=color.red, width=2)
         ln_tp1   := line.new(bar_index, scen_tp1, bar_index + 25, scen_tp1, color=color.red, width=2)
         ln_tp2   := line.new(bar_index, scen_tp2, bar_index + 25, scen_tp2, color=color.maroon, width=1, style=line.style_dashed)

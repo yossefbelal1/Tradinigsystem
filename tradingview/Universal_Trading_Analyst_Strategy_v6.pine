@@ -128,7 +128,7 @@ if not na(f_ph)
         if inp_show_sr
             bx := box.new(left=pivot_bar, top=top_p, right=bar_index + 15, bottom=bot_p, 
                           bgcolor=color.new(#ff5533, 75), border_color=color.new(#ff5533, 30), border_width=1)
-            lb := label.new(x=bar_index + 15, y=pivot_val, text="RES", style=label.style_none, textcolor=color.coral, size=size.tiny)
+            lb := label.new(x=bar_index + 15, y=pivot_val, text="RES", style=label.style_none, textcolor=color.red, size=size.tiny)
         SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
                                   role="RESISTANCE", start_bar=pivot_bar, is_active=true)
         array.push(g_sr_zones, new_z)
@@ -161,7 +161,7 @@ if not na(f_pl)
         if inp_show_sr
             bx := box.new(left=pivot_bar, top=top_p, right=bar_index + 15, bottom=bot_p, 
                           bgcolor=color.new(#00aaff, 75), border_color=color.new(#00aaff, 30), border_width=1)
-            lb := label.new(x=bar_index + 15, y=pivot_val, text="SUP", style=label.style_none, textcolor=color.dodgerblue, size=size.tiny)
+            lb := label.new(x=bar_index + 15, y=pivot_val, text="SUP", style=label.style_none, textcolor=color.blue, size=size.tiny)
         SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
                                   role="SUPPORT", start_bar=pivot_bar, is_active=true)
         array.push(g_sr_zones, new_z)
@@ -226,7 +226,7 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
                     color base_c = (z.role == "FLIPPED_TO_RESISTANCE") ? color.new(#ff7700, 75) : color.new(#ff5533, 75)
                     box.set_bgcolor(z.bx, base_c)
                     box.set_border_color(z.bx, color.new(base_c, 30))
-                    label.set_textcolor(z.lbl, color.coral)
+                    label.set_textcolor(z.lbl, color.red)
                 else
                     box.set_bgcolor(z.bx, color.new(color.white, 100))
                     box.set_border_color(z.bx, color.new(color.white, 100))
@@ -240,7 +240,7 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
                     color base_c = (z.role == "FLIPPED_TO_SUPPORT") ? color.new(#00cc88, 75) : color.new(#00aaff, 75)
                     box.set_bgcolor(z.bx, base_c)
                     box.set_border_color(z.bx, color.new(base_c, 30))
-                    label.set_textcolor(z.lbl, color.dodgerblue)
+                    label.set_textcolor(z.lbl, color.blue)
                 else
                     box.set_bgcolor(z.bx, color.new(color.white, 100))
                     box.set_border_color(z.bx, color.new(color.white, 100))
