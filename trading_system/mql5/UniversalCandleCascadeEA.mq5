@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                           PRO_CANDLE_CASCADE.mq5 |
 //|                                  Copyright 2026, Antigravity AI  |
-//|               Multi-Timeframe Candle Momentum & S/R Cascade EA   |
-//|             (W1+D1 Supply/Demand Bias -> Today Open -> M15 Entry)|
+//|    Professional Multi-Timeframe Break & Retest Cascade Engine   |
+//| (W1 Context -> D1 Broken Level in Premium/Discount -> H1 Retest) |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Antigravity AI"
 #property link      "https://github.com/Antigravity-AI"
-#property version   "3.00"
+#property version   "5.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -15,78 +15,98 @@
 #include <Trade\AccountInfo.mqh>
 
 //--- Enums
-enum ENUM_ENTRY_TYPE
+enum ENUM_ZONE_TYPE
 {
-   ENTRY_MARKET_INSTANT = 0, // Market Execution
-   ENTRY_PENDING_STOP   = 1  // Pending Stop Order (Breakout)
+   ZONE_BROKEN_SUPPORT_SELL = 0, // Broken support flipped to Resistance (SELL on retest in Premium)
+   ZONE_BROKEN_RESIST_BUY   = 1  // Broken resistance flipped to Support (BUY on retest in Discount)
 };
 
 enum ENUM_RISK_TYPE
 {
-   RISK_PERCENT = 0,         // Risk % of Equity
-   RISK_FIXED   = 1          // Fixed Lot Size
+   RISK_PERCENT = 0,             // Risk % of Equity
+   RISK_FIXED   = 1              // Fixed Lot Size
 };
 
-//--- Input Parameters
-input group "=== 1. Execution & Timing Window ==="
+//--- Struct for Active Broken Levels
+struct SBrokenZone
+{
+   ulong             id;
+   ENUM_ZONE_TYPE    type;
+   double            level;           // Broken price level
+   double            swing_extreme;   // Originating swing high (for sell) or low (for buy)
+   double            impulse_extreme; // Lowest low reached (for sell) or highest high (for buy)
+   datetime          break_time;      // Time bar closed beyond level
+   bool              active;          // Still valid and waiting for retest
+   bool              tested;          // Already tested
+};
+
+//--- Inputs
+input group "=== 1. Execution & Timing Window (Cairo Time) ==="
 input ulong             InpMagicNumber        = 777999;              // Magic Number
-input ENUM_TIMEFRAMES   InpExecTF             = PERIOD_M15;          // Intraday Execution Timeframe (M15 or M30)
-input ENUM_ENTRY_TYPE   InpEntryType          = ENTRY_MARKET_INSTANT;// Entry Order Type
-input int               InpStartHour          = 13;                  // Session Start Hour (13:00 NY Open Expansion)
-input int               InpEndHour            = 21;                  // Session End Hour (21:00 NY Close)
-input int               InpMaxTradesPerDay    = 2;                   // Max Trades per Day
-input int               InpMaxDailyLosses     = 1;                   // Max Losses per Day (1 = Stop trading if 1 trade loses)
+input ENUM_TIMEFRAMES   InpExecTF             = PERIOD_H1;           // Retest Execution Timeframe (H1 or H4)
+input bool              InpUseCairoSession    = true;                // Use Cairo Trading Hours (5 PM to Market Close)
+input int               InpCairoStartHour     = 17;                  // Cairo Session Start Hour (17:00 = 5:00 PM)
+input int               InpCairoEndHour       = 23;                  // Cairo Session End Hour (23:00 = Market Close)
+input int               InpMaxTradesPerDay    = 1;                   // Max Trades per Day (A+ Setups Only)
 
-input group "=== 2. Multi-Timeframe Alignment & Supply/Demand Bias ==="
-input bool              InpRequireW1Confluence= true;                // Require W1 Weekly Candle / Zone Agreement
-input bool              InpRequireD1Confluence= true;                // Require D1 Yesterday Confirmation
-input bool              InpRequireTodayExp    = true;                // Require Today Expansion (Above/Below Today Open)
-input bool              InpUseSupplyDemandBias= true;                // Use W1 & D1 Supply/Demand Zones for Daily Bias
-input int               InpW1LookbackBars     = 26;                  // Weekly S/D Lookback Bars
-input int               InpD1LookbackBars     = 35;                  // Daily S/D Lookback Bars
+input group "=== 2. Multi-Timeframe Structure & Breakout Rules ==="
+input bool              InpRequireW1Confluence= true;                // Require W1 Candle Direction Alignment
+input int               InpD1SwingBars        = 2;                   // D1 Swing Fractal Radius (2 = 5-bar swing)
+input int               InpD1HistoryBars      = 60;                  // D1 History Lookback Bars for Swings
+input double            InpRetestTolerancePct = 0.05;                // Retest Tolerance (% of ATR or price)
 
-input group "=== 3. Volatility & Support/Resistance Filter ==="
-input bool              InpUseATRFilter       = true;                // Filter Out Low Volatility Dead Markets
-input int               InpATRPeriod          = 14;                  // ATR Period
-input int               InpATRSMAPeriod       = 50;                  // ATR Baseline SMA Period
-input double            InpMinATRFactor       = 0.70;                // Min ATR Factor (ATR14 >= 0.70 * SMA50)
-input bool              InpUseSRFilter        = true;                // Enable H4 S/R Clearance Filter
-input ENUM_TIMEFRAMES   InpSRTimeframe        = PERIOD_H4;           // Support/Resistance Timeframe (H4)
-input int               InpSRLookbackBars     = 80;                  // S/R Fractal Lookback Bars
-input double            InpMinDistanceSRDollars = 4.0;               // Min Distance to Opposing S/R (in Dollars, e.g. $4 on Gold)
+input group "=== 3. Smart Money Dealing Range (Discount vs Premium) ==="
+input bool              InpRequirePremiumDiscount = true;            // Require Retest in Premium (Sell) / Discount (Buy)
+input double            InpEquilibriumPct     = 50.0;                // 50% Equilibrium Rule
 
-input group "=== 4. Risk & Target Management (R:R 1:1.5 - 1:2.0) ==="
-input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Sizing Mode
-input double            InpRiskPercent        = 1.0;                 // Risk Percent per Trade (1.0%)
+input group "=== 4. Risk & Target Management (FundingPips Compliant) ==="
+input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Mode
+input double            InpRiskPercent        = 2.0;                 // Risk Percent per Trade (2.0%)
 input double            InpFixedLot           = 0.01;                // Fixed Lot Size
-input double            InpRR_Ratio           = 1.5;                 // Target Risk-to-Reward Ratio (1:1.5)
-input int               InpSL_LookbackBars    = 6;                   // Intraday SL Lookback Bars (Recent Extreme)
-input double            InpSLBufferDollars    = 1.5;                 // Stop Loss Buffer in Dollars ($1.5)
-input double            InpMinRiskDollars     = 3.5;                 // Min Risk Distance in Dollars ($3.5 on Gold)
-input double            InpMaxRiskDollars     = 18.0;                // Max Risk Distance in Dollars ($18.0 on Gold)
-input bool              InpEnablePartialTP    = true;                // Close 50% at 1:1.5 and Move to Breakeven
-input double            InpRunnerTP_RR        = 2.0;                 // Runner Target (1:2.0)
+input double            InpSLBufferDollars    = 2.0;                 // Stop Loss Buffer ($2 on Gold, 25-35 on Nas)
+input double            InpRR_Ratio           = 1.5;                 // TP1 Risk-to-Reward Ratio (1:1.5)
+input bool              InpEnableRunnerTP     = true;                // Enable TP2 Runner to Impulse Floor/Ceiling
 input double            InpMaxSpreadPoints    = 500.0;               // Max Allowed Spread (Points)
 
 input group "=== 5. Prop Firm Guardian ==="
-input double            InpMaxDailyLossPct    = 2.5;                 // Max Daily Drawdown Circuit Breaker (%)
+input double            InpMaxDailyLossPct    = 4.0;                 // Max Daily Drawdown Circuit Breaker (4.0%)
 input bool              InpShowDashboard      = false;               // Show Visual Dashboard
-input bool              InpDebugLog           = false;               // Enable Verbose Diagnostics
+input bool              InpDebugLog           = true;                // Diagnostic Logging
 
-//--- Global Objects
+//--- Global Objects & State
 CTrade         m_trade;
 CPositionInfo  m_position;
 COrderInfo     m_order;
 CAccountInfo   m_account;
 
-int            h_fractals_sr = INVALID_HANDLE;
-int            h_atr_m15     = INVALID_HANDLE;
-int            h_ema20       = INVALID_HANDLE;
-datetime       g_lastExecBarTime = 0;
+SBrokenZone    g_zones[];
+ulong          g_zoneIdCounter   = 1;
+datetime       g_lastBarTime     = 0;
 int            g_tradesTodayCount = 0;
 int            g_currentDayOfYear = -1;
 double         g_dayStartEquity   = 0.0;
 bool           g_dailyCircuitBreaker = false;
+
+//+------------------------------------------------------------------+
+//| Calculate Cairo Hour accounting for Egypt Daylight Saving Time   |
+//+------------------------------------------------------------------+
+int GetCairoHour(datetime t)
+{
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+
+   bool isSummer = false;
+   if(dt.mon > 4 && dt.mon < 10)
+      isSummer = true;
+   else if(dt.mon == 4 && dt.day >= 25)
+      isSummer = true;
+   else if(dt.mon == 10 && dt.day < 25)
+      isSummer = true;
+
+   int cairoOffset = isSummer ? 3 : 2;
+   int cairoHour   = (dt.hour + cairoOffset) % 24;
+   return cairoHour;
+}
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -101,31 +121,10 @@ int OnInit()
    g_currentDayOfYear = -1;
    g_tradesTodayCount = 0;
    g_dailyCircuitBreaker = false;
+   ArrayResize(g_zones, 0);
 
-   // Initialize Fractals for H4 S/R clearance
-   if(InpUseSRFilter)
-   {
-      h_fractals_sr = iFractals(_Symbol, InpSRTimeframe);
-      if(h_fractals_sr == INVALID_HANDLE)
-         Print("Warning: Failed to create iFractals handle on ", EnumToString(InpSRTimeframe));
-   }
-
-   // Initialize ATR
-   if(InpUseATRFilter)
-   {
-      h_atr_m15 = iATR(_Symbol, InpExecTF, InpATRPeriod);
-      if(h_atr_m15 == INVALID_HANDLE)
-         Print("Warning: Failed to create iATR handle on ", EnumToString(InpExecTF));
-   }
-
-   // Initialize EMA20 for Dynamic Value & Pullback Filter
-   h_ema20 = iMA(_Symbol, InpExecTF, 20, 0, MODE_EMA, PRICE_CLOSE);
-   if(h_ema20 == INVALID_HANDLE)
-      Print("Warning: Failed to create iMA handle on ", EnumToString(InpExecTF));
-
-   PrintFormat("PRO CANDLE CASCADE v3.0 Initialized | Symbol: %s | ExecTF: %s | Hours: %d-%d | R:R: %.1f",
-               _Symbol, EnumToString(InpExecTF), InpStartHour, InpEndHour, InpRR_Ratio);
-   return INIT_SUCCEEDED;
+   Print("PRO CANDLE CASCADE V5.0 (Break & Retest in Premium/Discount) Initialized on ", _Symbol);
+   return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
@@ -133,18 +132,17 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   if(h_fractals_sr != INVALID_HANDLE) IndicatorRelease(h_fractals_sr);
-   if(h_atr_m15 != INVALID_HANDLE) IndicatorRelease(h_atr_m15);
-   if(h_ema20 != INVALID_HANDLE) IndicatorRelease(h_ema20);
+   ArrayFree(g_zones);
 }
 
 //+------------------------------------------------------------------+
-//| Daily Session & Loss Circuit Breaker                             |
+//| Daily Reset and Prop Firm Drawdown Circuit Breaker               |
 //+------------------------------------------------------------------+
 void CheckDailyReset()
 {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
+
    if(dt.day_of_year != g_currentDayOfYear)
    {
       g_currentDayOfYear    = dt.day_of_year;
@@ -170,61 +168,159 @@ void CheckDailyReset()
 }
 
 //+------------------------------------------------------------------+
-//| Real-time Deal History Loss Counter (Prop Firm Trade Guardian)   |
+//| Scan D1 Structure for Broken Levels                              |
 //+------------------------------------------------------------------+
-int GetDailyRealizedLosses()
+void UpdateBrokenStructureZones()
 {
-   datetime dayStart = iTime(_Symbol, PERIOD_D1, 0);
-   if(dayStart <= 0) return 0;
+   MqlRates d_rates[];
+   ArraySetAsSeries(d_rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_D1, 1, InpD1HistoryBars, d_rates);
+   if(copied < 10) return;
 
-   if(!HistorySelect(dayStart, TimeCurrent()))
-      return 0;
+   int radius = InpD1SwingBars;
 
-   int totalDeals = HistoryDealsTotal();
-   int losses = 0;
-
-   for(int i = 0; i < totalDeals; i++)
+   for(int i = radius; i < copied - radius; i++)
    {
-      ulong ticket = HistoryDealGetTicket(i);
-      if(ticket > 0)
+      // 1. Detect Swing Low
+      bool isSwingLow = true;
+      for(int r = 1; r <= radius; r++)
       {
-         long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
-         long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
-         string sym = HistoryDealGetString(ticket, DEAL_SYMBOL);
-
-         if(entry == DEAL_ENTRY_OUT && magic == InpMagicNumber && sym == _Symbol)
+         if(d_rates[i].low >= d_rates[i-r].low || d_rates[i].low >= d_rates[i+r].low)
          {
-            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-            if(profit < -0.01)
-               losses++;
+            isSwingLow = false;
+            break;
+         }
+      }
+
+      if(isSwingLow)
+      {
+         double swingLowPrice = d_rates[i].low;
+         datetime swingTime   = d_rates[i].time;
+
+         // Check if a subsequent daily bar closed below this swing low
+         for(int k = i - 1; k >= 0; k--)
+         {
+            if(d_rates[k].close < swingLowPrice)
+            {
+               // Found break! Check if already in zones
+               bool exists = false;
+               int totalZones = ArraySize(g_zones);
+               for(int z = 0; z < totalZones; z++)
+               {
+                  if(MathAbs(g_zones[z].level - swingLowPrice) < (0.5 * _Point))
+                  {
+                     exists = true;
+                     break;
+                  }
+               }
+
+               if(!exists)
+               {
+                  // Find swing high between swing low and break
+                  double swingHigh = swingLowPrice;
+                  for(int m = k; m <= i; m++)
+                  {
+                     if(d_rates[m].high > swingHigh) swingHigh = d_rates[m].high;
+                  }
+
+                  int newIdx = ArraySize(g_zones);
+                  ArrayResize(g_zones, newIdx + 1);
+                  g_zones[newIdx].id              = g_zoneIdCounter++;
+                  g_zones[newIdx].type            = ZONE_BROKEN_SUPPORT_SELL;
+                  g_zones[newIdx].level           = swingLowPrice;
+                  g_zones[newIdx].swing_extreme   = swingHigh;
+                  g_zones[newIdx].impulse_extreme = d_rates[k].low;
+                  g_zones[newIdx].break_time      = d_rates[k].time;
+                  g_zones[newIdx].active          = true;
+                  g_zones[newIdx].tested          = false;
+
+                  if(InpDebugLog)
+                     PrintFormat("Identified Broken Support Zone #%d at %.2f (Swing High: %.2f)",
+                                 g_zones[newIdx].id, swingLowPrice, swingHigh);
+               }
+               break;
+            }
+         }
+      }
+
+      // 2. Detect Swing High
+      bool isSwingHigh = true;
+      for(int r = 1; r <= radius; r++)
+      {
+         if(d_rates[i].high <= d_rates[i-r].high || d_rates[i].high <= d_rates[i+r].high)
+         {
+            isSwingHigh = false;
+            break;
+         }
+      }
+
+      if(isSwingHigh)
+      {
+         double swingHighPrice = d_rates[i].high;
+         datetime swingTime    = d_rates[i].time;
+
+         for(int k = i - 1; k >= 0; k--)
+         {
+            if(d_rates[k].close > swingHighPrice)
+            {
+               bool exists = false;
+               int totalZones = ArraySize(g_zones);
+               for(int z = 0; z < totalZones; z++)
+               {
+                  if(MathAbs(g_zones[z].level - swingHighPrice) < (0.5 * _Point))
+                  {
+                     exists = true;
+                     break;
+                  }
+               }
+
+               if(!exists)
+               {
+                  double swingLow = swingHighPrice;
+                  for(int m = k; m <= i; m++)
+                  {
+                     if(d_rates[m].low < swingLow) swingLow = d_rates[m].low;
+                  }
+
+                  int newIdx = ArraySize(g_zones);
+                  ArrayResize(g_zones, newIdx + 1);
+                  g_zones[newIdx].id              = g_zoneIdCounter++;
+                  g_zones[newIdx].type            = ZONE_BROKEN_RESIST_BUY;
+                  g_zones[newIdx].level           = swingHighPrice;
+                  g_zones[newIdx].swing_extreme   = swingLow;
+                  g_zones[newIdx].impulse_extreme = d_rates[k].high;
+                  g_zones[newIdx].break_time      = d_rates[k].time;
+                  g_zones[newIdx].active          = true;
+                  g_zones[newIdx].tested          = false;
+
+                  if(InpDebugLog)
+                     PrintFormat("Identified Broken Resistance Zone #%d at %.2f (Swing Low: %.2f)",
+                                 g_zones[newIdx].id, swingHighPrice, swingLow);
+               }
+               break;
+            }
          }
       }
    }
-   return losses;
 }
 
 //+------------------------------------------------------------------+
-//| Check ATR Volatility Filter                                      |
+//| Get Weekly (W1) Direction / Bias                                 |
 //+------------------------------------------------------------------+
-bool IsVolatilitySufficient()
+void GetWeeklyBias(bool &w_bull, bool &w_bear)
 {
-   if(!InpUseATRFilter || h_atr_m15 == INVALID_HANDLE) return true;
+   w_bull = false;
+   w_bear = false;
 
-   double atrBuf[];
-   ArraySetAsSeries(atrBuf, true);
-   int copied = CopyBuffer(h_atr_m15, 0, 1, InpATRSMAPeriod + 5, atrBuf);
-   if(copied < InpATRSMAPeriod) return true;
+   MqlRates w_rates[];
+   ArraySetAsSeries(w_rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_W1, 1, 3, w_rates);
+   if(copied < 1) return;
 
-   double currentATR = atrBuf[0];
-   double sumATR = 0.0;
-   for(int i = 0; i < InpATRSMAPeriod; i++)
-      sumATR += atrBuf[i];
-   double smaATR = sumATR / (double)InpATRSMAPeriod;
-
-   if(smaATR > 0.0 && currentATR < (smaATR * InpMinATRFactor))
-      return false; // Dead volatility / Low momentum compression
-
-   return true;
+   if(w_rates[0].close > w_rates[0].open)
+      w_bull = true;
+   else if(w_rates[0].close < w_rates[0].open)
+      w_bear = true;
 }
 
 //+------------------------------------------------------------------+
@@ -246,7 +342,6 @@ double CalculateLotSize(double slDistanceDollars)
    if(tickSize <= 0 || tickValue <= 0)
       return InpFixedLot;
 
-   // 1 standard lot moves (slDistanceDollars / tickSize) * tickValue
    double dollarPerLot = (slDistanceDollars / tickSize) * tickValue;
    if(dollarPerLot <= 0) return InpFixedLot;
 
@@ -261,202 +356,6 @@ double CalculateLotSize(double slDistanceDollars)
 
    rawLots = MathMax(minLot, MathMin(maxLot, rawLots));
    return rawLots;
-}
-
-//+------------------------------------------------------------------+
-//| Detect Supply and Demand Zones on High Timeframe (W1 or D1)     |
-//+------------------------------------------------------------------+
-void GetHTFSupplyDemandZones(ENUM_TIMEFRAMES tf, int lookback, 
-                             double &recentSupplyTop, double &recentSupplyBot,
-                             double &recentDemandTop, double &recentDemandBot)
-{
-   recentSupplyTop = 99999999.0;
-   recentSupplyBot = 99999999.0;
-   recentDemandTop = 0.0;
-   recentDemandBot = 0.0;
-
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int copied = CopyRates(_Symbol, tf, 1, lookback, rates);
-   if(copied < 5) return;
-
-   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   // Find nearest swing high above current price (Supply Zone)
-   for(int i = 2; i < copied - 2; i++)
-   {
-      if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high &&
-         rates[i].high > rates[i-2].high && rates[i].high > rates[i+2].high)
-      {
-         if(rates[i].high > currentBid && rates[i].high < recentSupplyTop)
-         {
-            recentSupplyTop = rates[i].high;
-            recentSupplyBot = MathMin(rates[i].open, rates[i].close);
-         }
-      }
-   }
-
-   // Find nearest swing low below current price (Demand Zone)
-   for(int i = 2; i < copied - 2; i++)
-   {
-      if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low &&
-         rates[i].low < rates[i-2].low && rates[i].low < rates[i+2].low)
-      {
-         if(rates[i].low < currentBid && rates[i].low > recentDemandBot)
-         {
-            recentDemandBot = rates[i].low;
-            recentDemandTop = MathMax(rates[i].open, rates[i].close);
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Evaluate Weekly (W1) Bias using Supply/Demand + Price Action     |
-//+------------------------------------------------------------------+
-void EvaluateWeeklyBias(bool &w1_bull, bool &w1_bear)
-{
-   w1_bull = false;
-   w1_bear = false;
-
-   MqlRates w_rates[];
-   ArraySetAsSeries(w_rates, true);
-   int copied = CopyRates(_Symbol, PERIOD_W1, 1, 10, w_rates);
-   if(copied < 2) return;
-
-   double w_close = w_rates[0].close;
-   double w_open  = w_rates[0].open;
-   double w_high  = w_rates[0].high;
-   double w_low   = w_rates[0].low;
-   double w_rng   = w_high - w_low;
-
-   double w_sup_top, w_sup_bot, w_dem_top, w_dem_bot;
-   GetHTFSupplyDemandZones(PERIOD_W1, InpW1LookbackBars, w_sup_top, w_sup_bot, w_dem_top, w_dem_bot);
-
-   bool testedSupply = (w_high >= w_sup_bot && w_close < w_sup_top);
-   bool testedDemand = (w_low <= w_dem_top && w_close > w_dem_bot);
-
-   bool w_bull_close  = (w_close > w_open);
-   bool w_bear_close  = (w_close < w_open);
-   bool w_bull_engulf = (w_close > w_open && w_close > w_rates[1].high);
-   bool w_bear_engulf = (w_close < w_open && w_close < w_rates[1].low);
-
-   bool w_shooting_star = (w_rng > 0 && (w_high - MathMax(w_open, w_close)) >= (0.45 * w_rng));
-   bool w_hammer        = (w_rng > 0 && (MathMin(w_open, w_close) - w_low) >= (0.45 * w_rng));
-
-   if(InpUseSupplyDemandBias && testedSupply && (w_bear_close || w_shooting_star))
-   {
-      w1_bear = true; // Weekly rejected Supply Zone
-   }
-   else if(InpUseSupplyDemandBias && testedDemand && (w_bull_close || w_hammer))
-   {
-      w1_bull = true; // Weekly bounced from Demand Zone
-   }
-   else
-   {
-      // Trend continuation & Candlestick Price Action
-      if(w_bull_engulf || (w_bull_close && !w_shooting_star))
-         w1_bull = true;
-      if(w_bear_engulf || (w_bear_close && !w_hammer))
-         w1_bear = true;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Evaluate Daily (D1) Confirmation using S/D + Price Action        |
-//+------------------------------------------------------------------+
-void EvaluateDailyBias(bool &d1_bull, bool &d1_bear)
-{
-   d1_bull = false;
-   d1_bear = false;
-
-   MqlRates d_rates[];
-   ArraySetAsSeries(d_rates, true);
-   int copied = CopyRates(_Symbol, PERIOD_D1, 1, 15, d_rates);
-   if(copied < 3) return;
-
-   double d_close = d_rates[0].close;
-   double d_open  = d_rates[0].open;
-   double d_high  = d_rates[0].high;
-   double d_low   = d_rates[0].low;
-   double d_rng   = d_high - d_low;
-
-   double p_high  = d_rates[1].high;
-   double p_low   = d_rates[1].low;
-
-   double d_sup_top, d_sup_bot, d_dem_top, d_dem_bot;
-   GetHTFSupplyDemandZones(PERIOD_D1, InpD1LookbackBars, d_sup_top, d_sup_bot, d_dem_top, d_dem_bot);
-
-   bool testedDailySupply = (d_high >= d_sup_bot && d_close < d_sup_top);
-   bool testedDailyDemand = (d_low <= d_dem_top && d_close > d_dem_bot);
-
-   bool d_bull_close  = (d_close > d_open);
-   bool d_bear_close  = (d_close < d_open);
-   bool d_bull_engulf = (d_close > d_open && d_close > p_high);
-   bool d_bear_engulf = (d_close < d_open && d_close < p_low);
-
-   bool d_shooting_star = (d_rng > 0 && (d_high - MathMax(d_open, d_close)) >= (0.45 * d_rng));
-   bool d_hammer        = (d_rng > 0 && (MathMin(d_open, d_close) - d_low) >= (0.45 * d_rng));
-
-   if(InpUseSupplyDemandBias && testedDailySupply && (d_bear_close || d_shooting_star))
-   {
-      d1_bear = true;
-   }
-   else if(InpUseSupplyDemandBias && testedDailyDemand && (d_bull_close || d_hammer))
-   {
-      d1_bull = true;
-   }
-   else
-   {
-      if(d_bull_engulf || (d_bull_close && !d_shooting_star))
-         d1_bull = true;
-      if(d_bear_engulf || (d_bear_close && !d_hammer))
-         d1_bear = true;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Find Nearest H4 Fractal Support and Resistance Levels            |
-//+------------------------------------------------------------------+
-void GetNearestSR(double &nearestResistance, double &nearestSupport)
-{
-   nearestResistance = 99999999.0;
-   nearestSupport    = 0.0;
-
-   if(h_fractals_sr == INVALID_HANDLE) return;
-
-   double upBuf[], lowBuf[];
-   ArraySetAsSeries(upBuf, true);
-   ArraySetAsSeries(lowBuf, true);
-
-   int copiedUp  = CopyBuffer(h_fractals_sr, 0, 1, InpSRLookbackBars, upBuf);
-   int copiedLow = CopyBuffer(h_fractals_sr, 1, 1, InpSRLookbackBars, lowBuf);
-
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   if(copiedUp > 0)
-   {
-      for(int i = 0; i < copiedUp; i++)
-      {
-         if(upBuf[i] != EMPTY_VALUE && upBuf[i] > currentPrice)
-         {
-            if(upBuf[i] < nearestResistance)
-               nearestResistance = upBuf[i];
-         }
-      }
-   }
-
-   if(copiedLow > 0)
-   {
-      for(int i = 0; i < copiedLow; i++)
-      {
-         if(lowBuf[i] != EMPTY_VALUE && lowBuf[i] < currentPrice)
-         {
-            if(lowBuf[i] > nearestSupport)
-               nearestSupport = lowBuf[i];
-         }
-      }
-   }
 }
 
 //+------------------------------------------------------------------+
@@ -487,8 +386,7 @@ void ManageOpenPositions()
                double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
                double targetTP1  = openPrice + (riskDist * InpRR_Ratio);
 
-               // Partial TP trigger: price reached TP1 (1:1.5) and SL not yet at breakeven
-               if(InpEnablePartialTP && currentBid >= targetTP1 && slPrice < openPrice)
+               if(currentBid >= targetTP1 && slPrice < openPrice)
                {
                   double halfLot = NormalizeDouble(volume * 0.5, 2);
                   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -496,17 +394,10 @@ void ManageOpenPositions()
                   if(stepLot > 0) halfLot = MathFloor(halfLot / stepLot) * stepLot;
 
                   if(halfLot >= minLot && (volume - halfLot) >= minLot)
-                  {
                      m_trade.PositionClosePartial(ticket, halfLot);
-                     PrintFormat("PRO CANDLE CASCADE: Partial Close 50% (%.2f lots) at TP1 (%.2f) on #%d",
-                                 halfLot, targetTP1, ticket);
-                  }
 
-                  // Move SL to Breakeven + 20 points
                   double beSL = openPrice + (20.0 * _Point);
-                  double runnerTP = openPrice + (riskDist * InpRunnerTP_RR);
-                  m_trade.PositionModify(ticket, beSL, runnerTP);
-                  PrintFormat("PRO CANDLE CASCADE: Moved SL to Breakeven (%.2f) on #%d", beSL, ticket);
+                  m_trade.PositionModify(ticket, beSL, m_position.TakeProfit());
                }
             }
             // Check SELL position
@@ -515,8 +406,7 @@ void ManageOpenPositions()
                double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
                double targetTP1  = openPrice - (riskDist * InpRR_Ratio);
 
-               // Partial TP trigger: price reached TP1 (1:1.5) and SL not yet at breakeven
-               if(InpEnablePartialTP && currentAsk <= targetTP1 && slPrice > openPrice)
+               if(currentAsk <= targetTP1 && slPrice > openPrice)
                {
                   double halfLot = NormalizeDouble(volume * 0.5, 2);
                   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -524,17 +414,10 @@ void ManageOpenPositions()
                   if(stepLot > 0) halfLot = MathFloor(halfLot / stepLot) * stepLot;
 
                   if(halfLot >= minLot && (volume - halfLot) >= minLot)
-                  {
                      m_trade.PositionClosePartial(ticket, halfLot);
-                     PrintFormat("PRO CANDLE CASCADE: Partial Close 50% (%.2f lots) at TP1 (%.2f) on #%d",
-                                 halfLot, targetTP1, ticket);
-                  }
 
-                  // Move SL to Breakeven - 20 points
                   double beSL = openPrice - (20.0 * _Point);
-                  double runnerTP = openPrice - (riskDist * InpRunnerTP_RR);
-                  m_trade.PositionModify(ticket, beSL, runnerTP);
-                  PrintFormat("PRO CANDLE CASCADE: Moved SL to Breakeven (%.2f) on #%d", beSL, ticket);
+                  m_trade.PositionModify(ticket, beSL, m_position.TakeProfit());
                }
             }
          }
@@ -556,14 +439,6 @@ int CountTotalPositions()
             count++;
       }
    }
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      if(m_order.SelectByIndex(i))
-      {
-         if(m_order.Symbol() == _Symbol && m_order.Magic() == InpMagicNumber)
-            count++;
-      }
-   }
    return count;
 }
 
@@ -580,143 +455,155 @@ void OnTick()
 
    if(g_dailyCircuitBreaker) return;
 
-   // 3. New Bar Check on Execution TF
-   datetime currentExecTime = iTime(_Symbol, InpExecTF, 0);
-   if(currentExecTime == g_lastExecBarTime) return;
-   g_lastExecBarTime = currentExecTime;
+   // 3. New Bar Check on Execution TF (H1)
+   datetime currentBarTime = iTime(_Symbol, InpExecTF, 0);
+   if(currentBarTime == g_lastBarTime) return;
+   g_lastBarTime = currentBarTime;
 
-   // 4. Session Timing Filter (NY Open to late afternoon 13:00 - 21:00)
+   // 4. Session Timing Filter (Cairo Time: 5 PM to Market Close)
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
-   if(dt.hour < InpStartHour || dt.hour >= InpEndHour || dt.hour == 12) return;
-   if(dt.day_of_week == 5 && dt.hour >= 20) return; // Friday gap protection
 
-   // Max daily trades limit
+   if(InpUseCairoSession)
+   {
+      int cairoHour = GetCairoHour(TimeCurrent());
+      if(cairoHour < InpCairoStartHour || cairoHour > InpCairoEndHour) return;
+      if(dt.day_of_week == 5 && cairoHour >= 22) return; // Friday gap protection
+   }
+
+   // Max daily trades limit (FundingPips: 1 high-quality trade per day)
    if(g_tradesTodayCount >= InpMaxTradesPerDay) return;
-
-   // Prop Firm Trade Guardian: Stop trading today if realized loss >= limit
-   if(InpMaxDailyLosses > 0 && GetDailyRealizedLosses() >= InpMaxDailyLosses)
-      return;
-
-   // If already in an active position, do not open another
    if(CountTotalPositions() > 0) return;
-
-   // Volatility regime filter
-   if(!IsVolatilitySufficient()) return;
 
    // Spread Protection
    double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(InpMaxSpreadPoints > 0 && spread > InpMaxSpreadPoints) return;
 
-   // 5. Gather Multi-Timeframe Alignment & Daily Bias
-   bool w1_bull = false, w1_bear = false;
-   bool d1_bull = false, d1_bear = false;
-   EvaluateWeeklyBias(w1_bull, w1_bear);
-   EvaluateDailyBias(d1_bull, d1_bear);
+   // 5. Update Broken Structure Zones on D1
+   UpdateBrokenStructureZones();
 
-   bool bias_buy  = (!InpRequireW1Confluence || w1_bull) && (!InpRequireD1Confluence || d1_bull);
-   bool bias_sell = (!InpRequireW1Confluence || w1_bear) && (!InpRequireD1Confluence || d1_bear);
+   // 6. Check Weekly Bias
+   bool w_bull = false, w_bear = false;
+   GetWeeklyBias(w_bull, w_bear);
 
-   // Today's Open Price
-   MqlRates rates_d1_curr[];
-   ArraySetAsSeries(rates_d1_curr, true);
-   if(CopyRates(_Symbol, PERIOD_D1, 0, 1, rates_d1_curr) < 1) return;
-   double today_open = rates_d1_curr[0].open;
+   // Intraday Execution Bar (Last completed H1 bar)
+   MqlRates h1_rates[];
+   ArraySetAsSeries(h1_rates, true);
+   if(CopyRates(_Symbol, InpExecTF, 1, 2, h1_rates) < 2) return;
 
-   // Intraday Execution Bar (Last completed M15 bar)
-   int checkBars = InpSL_LookbackBars + 2;
-   MqlRates rates_exec[];
-   ArraySetAsSeries(rates_exec, true);
-   int c_exec = CopyRates(_Symbol, InpExecTF, 1, checkBars, rates_exec);
-   if(c_exec < checkBars) return;
-
-   double c_sig = rates_exec[0].close;
-   double o_sig = rates_exec[0].open;
-
-   // Intraday recent extreme (last N bars)
-   double rec_high = rates_exec[0].high;
-   double rec_low  = rates_exec[0].low;
-   for(int k = 1; k < InpSL_LookbackBars; k++)
-   {
-      if(rates_exec[k].high > rec_high) rec_high = rates_exec[k].high;
-      if(rates_exec[k].low < rec_low)   rec_low  = rates_exec[k].low;
-   }
+   double b_high  = h1_rates[0].high;
+   double b_low   = h1_rates[0].low;
+   double b_close = h1_rates[0].close;
+   double b_open  = h1_rates[0].open;
 
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-   // Confluence Assessment (System & Entry conditions are identical!)
-   bool today_exp_buy  = (!InpRequireTodayExp) || (currentAsk > today_open);
-   bool today_exp_sell = (!InpRequireTodayExp) || (currentBid < today_open);
+   // Determine price tolerance based on instrument
+   double tol = (StringFind(_Symbol, "XAU") >= 0) ? 1.50 : 25.0;
+   double slBuffer = InpSLBufferDollars;
 
-   // Dynamic Value EMA20 Filter (Must pull back to near value, not chase extended tops)
-   double emaBuf[];
-   ArraySetAsSeries(emaBuf, true);
-   double emaVal = 0.0;
-   if(h_ema20 != INVALID_HANDLE && CopyBuffer(h_ema20, 0, 1, 1, emaBuf) > 0)
-      emaVal = emaBuf[0];
-
-   bool pullBackBuy  = (emaVal > 0.0) ? (c_sig > emaVal && rec_low <= (emaVal + 4.5)) : true;
-   bool pullBackSell = (emaVal > 0.0) ? (c_sig < emaVal && rec_high >= (emaVal - 4.5)) : true;
-
-   bool setup_buy  = bias_buy  && today_exp_buy  && (c_sig > o_sig) && pullBackBuy;
-   bool setup_sell = bias_sell && today_exp_sell && (c_sig < o_sig) && pullBackSell;
-
-   // 6. Major Support and Resistance Clearance Filter
-   double nearestRes = 0.0, nearestSup = 0.0;
-   if(InpUseSRFilter)
+   // 7. Check Active Zones for Break & Retest Setup
+   int totalZones = ArraySize(g_zones);
+   for(int z = 0; z < totalZones; z++)
    {
-      GetNearestSR(nearestRes, nearestSup);
-      if(setup_buy && (nearestRes - currentAsk) < InpMinDistanceSRDollars)
-         setup_buy = false;
-      if(setup_sell && (currentBid - nearestSup) < InpMinDistanceSRDollars)
-         setup_sell = false;
-   }
+      if(!g_zones[z].active || g_zones[z].tested) continue;
 
-   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   double minStopDist = (stopsLevel + 5) * _Point;
+      double level = g_zones[z].level;
 
-   // 7. Execute Orders with Precise Intraday Structural SL
-   // --- BUY SETUP ---
-   if(setup_buy && !setup_sell)
-   {
-      double slPrice = rec_low - InpSLBufferDollars;
-      if(currentAsk - slPrice < minStopDist) slPrice = currentAsk - minStopDist;
-
-      double riskDistDollars = currentAsk - slPrice;
-      if(riskDistDollars < InpMinRiskDollars || riskDistDollars > InpMaxRiskDollars)
-         return;
-
-      double targetRR = InpEnablePartialTP ? InpRunnerTP_RR : InpRR_Ratio;
-      double tpPrice  = currentAsk + (riskDistDollars * targetRR);
-
-      double lot = CalculateLotSize(riskDistDollars);
-      if(m_trade.Buy(lot, _Symbol, currentAsk, slPrice, tpPrice, "CASCADE Buy"))
+      // --- SELL SETUP (Broken Support -> Resistance Retest in Premium) ---
+      if(g_zones[z].type == ZONE_BROKEN_SUPPORT_SELL)
       {
-         g_tradesTodayCount++;
-         PrintFormat("PRO CANDLE CASCADE: Executed BUY at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lots: %.2f",
-                     currentAsk, slPrice, riskDistDollars, tpPrice, lot);
+         if(InpRequireW1Confluence && !w_bear) continue;
+
+         // Update lowest low reached by the move
+         if(b_low < g_zones[z].impulse_extreme)
+            g_zones[z].impulse_extreme = b_low;
+
+         double eq = (g_zones[z].swing_extreme + g_zones[z].impulse_extreme) / 2.0;
+
+         // Check if price pulled up into the broken floor in Premium
+         bool inPremium = (!InpRequirePremiumDiscount) || (b_high >= eq);
+         bool touchedLevel = (b_high >= (level - tol));
+
+         if(inPremium && touchedLevel)
+         {
+            // Retest Rejection: candle closed back below the broken level
+            if(b_close <= level)
+            {
+               double slPrice = MathMax(g_zones[z].swing_extreme, b_high + slBuffer);
+               double riskDist = slPrice - currentBid;
+
+               if(riskDist > 0.5)
+               {
+                  double tpPrice = InpEnableRunnerTP ? g_zones[z].impulse_extreme : (currentBid - (riskDist * InpRR_Ratio));
+                  double lot = CalculateLotSize(riskDist);
+
+                  if(m_trade.Sell(lot, _Symbol, currentBid, slPrice, tpPrice, "CASCADE Retest SELL"))
+                  {
+                     g_tradesTodayCount++;
+                     g_zones[z].tested = true;
+                     g_zones[z].active = false;
+                     PrintFormat("PRO CANDLE CASCADE V5: Executed SELL Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
+                                 currentBid, slPrice, riskDist, tpPrice, lot);
+                     break;
+                  }
+               }
+            }
+            // Invalidation: if price closes decisively above the level, zone is blown and deleted
+            else if(b_close > (level + 2.0 * tol))
+            {
+               g_zones[z].active = false;
+               PrintFormat("Zone #%d Invalidated and Removed (Closed above broken level)", g_zones[z].id);
+            }
+         }
       }
-   }
-   // --- SELL SETUP ---
-   else if(setup_sell && !setup_buy)
-   {
-      double slPrice = rec_high + InpSLBufferDollars;
-      if(slPrice - currentBid < minStopDist) slPrice = currentBid + minStopDist;
-
-      double riskDistDollars = slPrice - currentBid;
-      if(riskDistDollars < InpMinRiskDollars || riskDistDollars > InpMaxRiskDollars)
-         return;
-
-      double targetRR = InpEnablePartialTP ? InpRunnerTP_RR : InpRR_Ratio;
-      double tpPrice  = currentBid - (riskDistDollars * targetRR);
-
-      double lot = CalculateLotSize(riskDistDollars);
-      if(m_trade.Sell(lot, _Symbol, currentBid, slPrice, tpPrice, "CASCADE Sell"))
+      // --- BUY SETUP (Broken Resistance -> Support Retest in Discount) ---
+      else if(g_zones[z].type == ZONE_BROKEN_RESIST_BUY)
       {
-         g_tradesTodayCount++;
-         PrintFormat("PRO CANDLE CASCADE: Executed SELL at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lots: %.2f",
-                     currentBid, slPrice, riskDistDollars, tpPrice, lot);
+         if(InpRequireW1Confluence && !w_bull) continue;
+
+         // Update highest high reached by the move
+         if(b_high > g_zones[z].impulse_extreme)
+            g_zones[z].impulse_extreme = b_high;
+
+         double eq = (g_zones[z].swing_extreme + g_zones[z].impulse_extreme) / 2.0;
+
+         // Check if price pulled down into the broken ceiling in Discount
+         bool inDiscount = (!InpRequirePremiumDiscount) || (b_low <= eq);
+         bool touchedLevel = (b_low <= (level + tol));
+
+         if(inDiscount && touchedLevel)
+         {
+            // Retest Bounce: candle closed back above the broken level
+            if(b_close >= level)
+            {
+               double slPrice = MathMin(g_zones[z].swing_extreme, b_low - slBuffer);
+               double riskDist = currentAsk - slPrice;
+
+               if(riskDist > 0.5)
+               {
+                  double tpPrice = InpEnableRunnerTP ? g_zones[z].impulse_extreme : (currentAsk + (riskDist * InpRR_Ratio));
+                  double lot = CalculateLotSize(riskDist);
+
+                  if(m_trade.Buy(lot, _Symbol, currentAsk, slPrice, tpPrice, "CASCADE Retest BUY"))
+                  {
+                     g_tradesTodayCount++;
+                     g_zones[z].tested = true;
+                     g_zones[z].active = false;
+                     PrintFormat("PRO CANDLE CASCADE V5: Executed BUY Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
+                                 currentAsk, slPrice, riskDist, tpPrice, lot);
+                     break;
+                  }
+               }
+            }
+            // Invalidation: if price closes decisively below the level, zone is blown and deleted
+            else if(b_close < (level - 2.0 * tol))
+            {
+               g_zones[z].active = false;
+               PrintFormat("Zone #%d Invalidated and Removed (Closed below broken level)", g_zones[z].id);
+            }
+         }
       }
    }
 }
