@@ -53,7 +53,9 @@ input int               InpMaxTradesPerDay    = 1;                   // Max Trad
 input group "=== 2. Multi-Timeframe Structure & EMA 100 Rule ==="
 input bool              InpUseEMA100Filter    = true;                // Enforce Strict EMA 100 Rule ("مافيش بيع فوق 100 و العكس")
 input int               InpEMA100Period       = 100;                 // EMA Period (100)
-input ENUM_TIMEFRAMES   InpEMA100TF           = PERIOD_H4;           // EMA Timeframe (H4 or D1)
+input bool              InpRequireWeeklyTrend = true;                // Weekly Trend Confluence (Green=Buy, Red=Sell)
+input bool              InpRequireDailyCandleBias = true;            // Daily Candle Trend Confluence (Green=Buy, Red=Sell)                // Weekly Trend Confluence (Green=Buy, Red=Sell)
+input ENUM_TIMEFRAMES   InpEMA100TF           = PERIOD_D1;           // EMA Timeframe (D1 Macro Trend)           // EMA Timeframe (H4 or D1)
 input bool              InpRequireCandleColor = true;                // Require Rejection Candle (Red for Sell, Green for Buy)
 input int               InpStructureSwingBars = 2;                   // Structure Swing Fractal Radius (2 = 5-bar swing)
 input int               InpStructureLookback  = 80;                  // Lookback Bars for Structure Swings
@@ -68,11 +70,12 @@ input group "=== 4. Risk & Target Management (FundingPips Compliant) ==="
 input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Mode
 input double            InpRiskPercent        = 1.5;                 // Risk Percent per Trade (1.5%)
 input double            InpFixedLot           = 0.01;                // Fixed Lot Size
-input double            InpSLBufferDollars    = 35.0;                // Stop Loss Buffer (35 pts on Nas, 2.5 on Gold)
+input double            InpSLBufferDollars    = 75.0;                // Stop Loss Buffer (35 pts on Nas, 2.5 on Gold)
 input double            InpRR_Ratio           = 1.5;                 // Take Profit Risk-to-Reward Ratio (1:1.5)
-input bool              InpCloseFullOnTP1     = false;               // Bank Full Profit at TP1
-input double            InpPartialClosePct    = 50.0;                // Partial Close % at TP1
-input bool              InpEnableRunnerTP     = true;                // Target Previous Swing Floor/Ceiling (Full Move)
+input bool              InpCloseFullOnTP1     = true;               // Bank Full Profit at TP1
+input double            InpPartialClosePct    = 0.0;                // Partial Close % at TP1
+input bool              InpEnableRunnerTP     = false;
+input bool              InpEnableMoveToBE     = false;               // Move to Breakeven (Strictly Disabled)                // Target Previous Swing Floor/Ceiling (Full Move)
 input double            InpMaxSpreadPoints    = 500.0;               // Max Allowed Spread (Points)
 
 input group "=== 5. Prop Firm Guardian ==="
@@ -89,6 +92,11 @@ COrderInfo     m_order;
 CAccountInfo   m_account;
 
 SBrokenZone    g_zones[];
+SBrokenZone    g_activeSellZone;
+SBrokenZone    g_activeBuyZone;
+bool           g_hasSellZone = false;
+bool           g_hasBuyZone  = false;
+datetime       g_lastH4BarTime = 0;
 ulong          g_zoneIdCounter   = 1;
 datetime       g_lastBarTime     = 0;
 int            g_tradesTodayCount = 0;
@@ -199,6 +207,10 @@ void CheckDailyReset()
 //+------------------------------------------------------------------+
 void UpdateBrokenStructureZones()
 {
+   datetime currentH4Time = iTime(_Symbol, InpStructureTF, 0);
+   if(currentH4Time == g_lastH4BarTime) return;
+   g_lastH4BarTime = currentH4Time;
+
    MqlRates s_rates[];
    ArraySetAsSeries(s_rates, true);
    int copied = CopyRates(_Symbol, InpStructureTF, 1, InpStructureLookback, s_rates);
@@ -222,48 +234,23 @@ void UpdateBrokenStructureZones()
       if(isSwingLow)
       {
          double swingLowPrice = s_rates[i].low;
-
-         // Check if a subsequent bar closed below this swing low
-         for(int k = i - 1; k >= 0; k--)
+         // Check if the most recent completed H4 bar broke this swing low
+         if(s_rates[0].close < swingLowPrice)
          {
-            if(s_rates[k].close < swingLowPrice)
+            double swingHigh = swingLowPrice;
+            for(int m = 0; m <= i; m++)
             {
-               bool exists = false;
-               int totalZones = ArraySize(g_zones);
-               for(int z = 0; z < totalZones; z++)
-               {
-                  if(g_zones[z].active && MathAbs(g_zones[z].level - swingLowPrice) < (2.0 * _Point))
-                  {
-                     exists = true;
-                     break;
-                  }
-               }
-
-               if(!exists)
-               {
-                  double swingHigh = swingLowPrice;
-                  for(int m = k; m <= i; m++)
-                  {
-                     if(s_rates[m].high > swingHigh) swingHigh = s_rates[m].high;
-                  }
-
-                  int newIdx = ArraySize(g_zones);
-                  ArrayResize(g_zones, newIdx + 1);
-                  g_zones[newIdx].id              = g_zoneIdCounter++;
-                  g_zones[newIdx].type            = ZONE_BROKEN_SUPPORT_SELL;
-                  g_zones[newIdx].level           = swingLowPrice;
-                  g_zones[newIdx].swing_extreme   = swingHigh;
-                  g_zones[newIdx].impulse_extreme = s_rates[k].low;
-                  g_zones[newIdx].break_time      = s_rates[k].time;
-                  g_zones[newIdx].active          = true;
-                  g_zones[newIdx].tested          = false;
-
-                  if(InpDebugLog)
-                     PrintFormat("Identified Broken Support Zone #%d at %.2f (Swing High: %.2f)",
-                                 g_zones[newIdx].id, swingLowPrice, swingHigh);
-               }
-               break;
+               if(s_rates[m].high > swingHigh) swingHigh = s_rates[m].high;
             }
+
+            g_activeSellZone.level           = swingLowPrice;
+            g_activeSellZone.swing_extreme   = swingHigh;
+            g_activeSellZone.impulse_extreme = s_rates[0].low;
+            g_activeSellZone.break_time      = s_rates[0].time;
+            g_activeSellZone.active          = true;
+            g_activeSellZone.tested          = false;
+            g_hasSellZone                    = true;
+            break;
          }
       }
 
@@ -281,52 +268,27 @@ void UpdateBrokenStructureZones()
       if(isSwingHigh)
       {
          double swingHighPrice = s_rates[i].high;
-
-         for(int k = i - 1; k >= 0; k--)
+         // Check if the most recent completed H4 bar broke this swing high
+         if(s_rates[0].close > swingHighPrice)
          {
-            if(s_rates[k].close > swingHighPrice)
+            double swingLow = swingHighPrice;
+            for(int m = 0; m <= i; m++)
             {
-               bool exists = false;
-               int totalZones = ArraySize(g_zones);
-               for(int z = 0; z < totalZones; z++)
-               {
-                  if(g_zones[z].active && MathAbs(g_zones[z].level - swingHighPrice) < (2.0 * _Point))
-                  {
-                     exists = true;
-                     break;
-                  }
-               }
-
-               if(!exists)
-               {
-                  double swingLow = swingHighPrice;
-                  for(int m = k; m <= i; m++)
-                  {
-                     if(s_rates[m].low < swingLow) swingLow = s_rates[m].low;
-                  }
-
-                  int newIdx = ArraySize(g_zones);
-                  ArrayResize(g_zones, newIdx + 1);
-                  g_zones[newIdx].id              = g_zoneIdCounter++;
-                  g_zones[newIdx].type            = ZONE_BROKEN_RESIST_BUY;
-                  g_zones[newIdx].level           = swingHighPrice;
-                  g_zones[newIdx].swing_extreme   = swingLow;
-                  g_zones[newIdx].impulse_extreme = s_rates[k].high;
-                  g_zones[newIdx].break_time      = s_rates[k].time;
-                  g_zones[newIdx].active          = true;
-                  g_zones[newIdx].tested          = false;
-
-                  if(InpDebugLog)
-                     PrintFormat("Identified Broken Resistance Zone #%d at %.2f (Swing Low: %.2f)",
-                                 g_zones[newIdx].id, swingHighPrice, swingLow);
-               }
-               break;
+               if(s_rates[m].low < swingLow) swingLow = s_rates[m].low;
             }
+
+            g_activeBuyZone.level           = swingHighPrice;
+            g_activeBuyZone.swing_extreme   = swingLow;
+            g_activeBuyZone.impulse_extreme = s_rates[0].high;
+            g_activeBuyZone.break_time      = s_rates[0].time;
+            g_activeBuyZone.active          = true;
+            g_activeBuyZone.tested          = false;
+            g_hasBuyZone                    = true;
+            break;
          }
       }
    }
 }
-
 //+------------------------------------------------------------------+
 //| Calculate Lot Size Based on Structural Stop Loss Risk            |
 //+------------------------------------------------------------------+
@@ -367,6 +329,7 @@ double CalculateLotSize(double slDistanceDollars)
 //+------------------------------------------------------------------+
 void ManageOpenPositions()
 {
+   if(!InpEnableMoveToBE) return; // Strictly disabled to prevent premature BE exits!
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(m_position.SelectByIndex(i))
@@ -479,36 +442,62 @@ void GetEMA100Trend(bool &allow_buy, bool &allow_sell)
 {
    allow_buy = true;
    allow_sell = true;
-   if(!InpUseEMA100Filter) return;
 
-   if(g_hEMA100 == INVALID_HANDLE)
+   // 1. Weekly Candle Trend Confluence
+   if(InpRequireWeeklyTrend)
    {
-      g_hEMA100 = iMA(_Symbol, InpEMA100TF, InpEMA100Period, 0, MODE_EMA, PRICE_CLOSE);
-      if(g_hEMA100 == INVALID_HANDLE) return;
+      MqlRates wRates[];
+      ArraySetAsSeries(wRates, true);
+      if(CopyRates(_Symbol, PERIOD_W1, 1, 1, wRates) >= 1)
+      {
+         if(wRates[0].close > wRates[0].open)
+            allow_sell = false; // Bullish Week: Only Buys
+         else if(wRates[0].close < wRates[0].open)
+            allow_buy = false;  // Bearish Week: Only Sells
+      }
    }
 
-   double maVal[1];
-   if(CopyBuffer(g_hEMA100, 0, 1, 1, maVal) >= 1)
+   // 2. Daily Candle Trend Confluence
+   if(InpRequireDailyCandleBias)
    {
-      MqlRates tfRates[1];
-      if(CopyRates(_Symbol, InpEMA100TF, 1, 1, tfRates) >= 1)
+      MqlRates dRates[];
+      ArraySetAsSeries(dRates, true);
+      if(CopyRates(_Symbol, PERIOD_D1, 1, 1, dRates) >= 1)
       {
-         if(tfRates[0].close > maVal[0])
+         if(dRates[0].close > dRates[0].open)
+            allow_sell = false; // Bullish Day: Only Buys
+         else if(dRates[0].close < dRates[0].open)
+            allow_buy = false;  // Bearish Day: Only Sells
+      }
+   }
+
+   // 2. Strict EMA 100 Rule ("مافيش بيع طول ما هو فوق ال 100 و العكس")
+   if(InpUseEMA100Filter)
+   {
+      if(g_hEMA100 == INVALID_HANDLE)
+         g_hEMA100 = iMA(_Symbol, InpEMA100TF, InpEMA100Period, 0, MODE_EMA, PRICE_CLOSE);
+
+      if(g_hEMA100 != INVALID_HANDLE)
+      {
+         double maVal[1];
+         if(CopyBuffer(g_hEMA100, 0, 1, 1, maVal) >= 1)
          {
-            // Price is ABOVE EMA 100: ONLY BUY! NO SELL!
-            allow_buy  = true;
-            allow_sell = false;
-         }
-         else if(tfRates[0].close < maVal[0])
-         {
-            // Price is BELOW EMA 100: ONLY SELL! NO BUY!
-            allow_buy  = false;
-            allow_sell = true;
+            MqlRates tfRates[1];
+            if(CopyRates(_Symbol, InpEMA100TF, 1, 1, tfRates) >= 1)
+            {
+               if(tfRates[0].close > maVal[0])
+               {
+                  allow_sell = false; // Above EMA 100: NO SELLS
+               }
+               else if(tfRates[0].close < maVal[0])
+               {
+                  allow_buy = false;  // Below EMA 100: NO BUYS
+               }
+            }
          }
       }
    }
 }
-
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
@@ -592,115 +581,96 @@ void OnTick()
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
    double tol = (StringFind(_Symbol, "XAU") >= 0) ? 2.50 : 25.0;
-   double slBuffer = (StringFind(_Symbol, "XAU") >= 0) ? InpSLBufferDollars : MathMax(InpSLBufferDollars, 35.0);
+   double slBuffer = (StringFind(_Symbol, "XAU") >= 0) ? InpSLBufferDollars : MathMax(InpSLBufferDollars, 75.0);
 
    // 7. Check Active Zones for Break & Retest Setup
-   int totalZones = ArraySize(g_zones);
-   for(int z = 0; z < totalZones; z++)
+   // --- SELL SETUP (Broken Support -> Resistance Retest in Premium) ---
+   if(g_hasSellZone && g_activeSellZone.active && !g_activeSellZone.tested && allow_sell)
    {
-      if(!g_zones[z].active || g_zones[z].tested) continue;
+      double level = g_activeSellZone.level;
+      if(b_low < g_activeSellZone.impulse_extreme)
+         g_activeSellZone.impulse_extreme = b_low;
 
-      double level = g_zones[z].level;
-
-      // --- SELL SETUP (Broken Support -> Resistance Retest in Premium) ---
-      if(g_zones[z].type == ZONE_BROKEN_SUPPORT_SELL)
+      double dealingRange = g_activeSellZone.swing_extreme - g_activeSellZone.impulse_extreme;
+      if(dealingRange > 0)
       {
-         if(!allow_sell) continue;
-
-         // Update lowest low reached by the move
-         if(b_low < g_zones[z].impulse_extreme)
-            g_zones[z].impulse_extreme = b_low;
-
-         double dealingRange = g_zones[z].swing_extreme - g_zones[z].impulse_extreme;
-         if(dealingRange <= 0) continue;
-         double eq = g_zones[z].impulse_extreme + (dealingRange * (InpEquilibriumPct / 100.0));
-
-         // Check if price pulled up into the broken floor in Premium
+         double eq = g_activeSellZone.impulse_extreme + (dealingRange * (InpEquilibriumPct / 100.0));
          bool inPremium = (!InpRequirePremiumDiscount) || (b_high >= eq);
          bool touchedLevel = (b_high >= (level - tol));
 
          if(inPremium && touchedLevel)
          {
-            // Retest Rejection or Liquidity Sweep: candle closed back near/below the broken level
             if(b_close <= (level + tol) && (!InpRequireCandleColor || b_close < b_open))
             {
                double slPrice = b_high + slBuffer;
                double riskDist = slPrice - currentBid;
 
-               if(riskDist > 1.0)
+               if(riskDist > 5.0)
                {
-                  double targetDist = currentBid - g_zones[z].impulse_extreme;
-                  double tpPrice = (InpEnableRunnerTP && targetDist >= (riskDist * InpRR_Ratio)) ? 
-                                   g_zones[z].impulse_extreme : 
-                                   (currentBid - (riskDist * InpRR_Ratio));
+                  double tpPrice = currentBid - (riskDist * InpRR_Ratio);
                   double lot = CalculateLotSize(riskDist);
 
                   if(m_trade.Sell(lot, _Symbol, currentBid, slPrice, tpPrice, "CASCADE Retest SELL"))
                   {
                      g_tradesTodayCount++;
-                     g_zones[z].tested = true;
-                     g_zones[z].active = false;
+                     g_activeSellZone.tested = true;
+                     g_activeSellZone.active = false;
+                     g_hasSellZone = false;
                      PrintFormat("PRO CANDLE CASCADE V6.0: Executed SELL Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
                                  currentBid, slPrice, riskDist, tpPrice, lot);
-                     break;
                   }
                }
             }
-            // Invalidation: if price closes decisively above the level, zone is blown and deleted
-            else if(b_close > (level + 4.0 * tol))
+            else if(b_close > (level + 3.0 * tol))
             {
-               g_zones[z].active = false;
+               g_activeSellZone.active = false;
+               g_hasSellZone = false;
             }
          }
       }
-      // --- BUY SETUP (Broken Resistance -> Support Retest in Discount) ---
-      else if(g_zones[z].type == ZONE_BROKEN_RESIST_BUY)
+   }
+
+   // --- BUY SETUP (Broken Resistance -> Support Retest in Discount) ---
+   if(g_hasBuyZone && g_activeBuyZone.active && !g_activeBuyZone.tested && allow_buy)
+   {
+      double level = g_activeBuyZone.level;
+      if(b_high > g_activeBuyZone.impulse_extreme)
+         g_activeBuyZone.impulse_extreme = b_high;
+
+      double dealingRange = g_activeBuyZone.impulse_extreme - g_activeBuyZone.swing_extreme;
+      if(dealingRange > 0)
       {
-         if(!allow_buy) continue;
-
-         // Update highest high reached by the move
-         if(b_high > g_zones[z].impulse_extreme)
-            g_zones[z].impulse_extreme = b_high;
-
-         double dealingRange = g_zones[z].impulse_extreme - g_zones[z].swing_extreme;
-         if(dealingRange <= 0) continue;
-         double eq = g_zones[z].swing_extreme + (dealingRange * (InpEquilibriumPct / 100.0));
-
-         // Check if price pulled down into the broken ceiling in Discount
+         double eq = g_activeBuyZone.swing_extreme + (dealingRange * (InpEquilibriumPct / 100.0));
          bool inDiscount = (!InpRequirePremiumDiscount) || (b_low <= eq);
          bool touchedLevel = (b_low <= (level + tol));
 
          if(inDiscount && touchedLevel)
          {
-            // Retest Bounce or Liquidity Sweep: candle closed back near/above the broken level
             if(b_close >= (level - tol) && (!InpRequireCandleColor || b_close > b_open))
             {
                double slPrice = b_low - slBuffer;
                double riskDist = currentAsk - slPrice;
 
-               if(riskDist > 1.0)
+               if(riskDist > 5.0)
                {
-                  double targetDist = g_zones[z].impulse_extreme - currentAsk;
-                  double tpPrice = (InpEnableRunnerTP && targetDist >= (riskDist * InpRR_Ratio)) ? 
-                                   g_zones[z].impulse_extreme : 
-                                   (currentAsk + (riskDist * InpRR_Ratio));
+                  double tpPrice = currentAsk + (riskDist * InpRR_Ratio);
                   double lot = CalculateLotSize(riskDist);
 
                   if(m_trade.Buy(lot, _Symbol, currentAsk, slPrice, tpPrice, "CASCADE Retest BUY"))
                   {
                      g_tradesTodayCount++;
-                     g_zones[z].tested = true;
-                     g_zones[z].active = false;
+                     g_activeBuyZone.tested = true;
+                     g_activeBuyZone.active = false;
+                     g_hasBuyZone = false;
                      PrintFormat("PRO CANDLE CASCADE V6.0: Executed BUY Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
                                  currentAsk, slPrice, riskDist, tpPrice, lot);
-                     break;
                   }
                }
             }
-            // Invalidation: if price closes decisively below the level, zone is blown and deleted
-            else if(b_close < (level - 4.0 * tol))
+            else if(b_close < (level - 3.0 * tol))
             {
-               g_zones[z].active = false;
+               g_activeBuyZone.active = false;
+               g_hasBuyZone = false;
             }
          }
       }
