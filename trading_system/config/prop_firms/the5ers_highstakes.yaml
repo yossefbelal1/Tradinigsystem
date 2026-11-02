@@ -1,0 +1,27 @@
+name: "The5ers (High Stakes 2-Step)"
+platform: "MetaTrader 5"
+mt5_compatible: true
+supported_instruments: ["Forex", "Metals", "Indices"]
+phases: 2
+
+# Drawdown architecture
+drawdown_type: "static"           # Static 10% from initial balance
+max_drawdown_pct: 10.0
+daily_loss_limit_pct: 5.0
+daily_loss_basis: "equity"        # Equity at daily reset
+
+# Profit milestones
+profit_target_phase1_pct: 8.0
+profit_target_phase2_pct: 5.0
+
+# Time constraints
+min_trading_days: 3
+max_trading_days: null
+
+# Execution permissions
+consistency_rule: false
+news_trading_allowed: true
+weekend_holding_allowed: true
+scaling_plan: true
+payout_split_pct: 80.0
+first_payout_days: 14

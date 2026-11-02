@@ -1,0 +1,26 @@
+name: "Apex Trader Funding (CME Futures)"
+platform: "cme_futures"
+mt5_compatible: false
+futures_warning: "WARNING: Apex Trader Funding operates exclusively on CME/COMEX/NYMEX Futures (GC, NQ, ES, CL, 6E) via Tradovate/Rithmic. It does NOT support MT5 or spot Forex/CFD."
+supported_instruments: ["GC Gold Futures", "NQ Nasdaq Futures", "ES S&P Futures", "CL Crude Oil Futures", "6E Euro FX Futures"]
+phases: 1
+
+# Drawdown architecture
+drawdown_type: "intraday_trailing" # Real-time peak unrealized profit trails drawdown
+max_drawdown_pct: 6.0
+daily_loss_limit_pct: null         # Apex has no daily loss limit
+daily_loss_basis: null
+
+# Profit milestones
+profit_target_phase1_pct: 6.0
+profit_target_phase2_pct: null
+
+# Time constraints
+min_trading_days: null
+max_trading_days: null
+
+# Execution permissions
+consistency_rule: false
+news_trading_allowed: true
+weekend_holding_allowed: false     # STRICT: Overnight/weekend positions prohibited
+scaling_plan: true

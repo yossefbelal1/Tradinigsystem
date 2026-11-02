@@ -1,0 +1,43 @@
+# Core data & numerics
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Technical Analysis
+pandas-ta>=0.3.14b
+TA-Lib>=0.4.28
+smartmoneyconcepts>=0.0.13
+
+# Market Data Sources
+MetaTrader5>=5.0.45
+yfinance>=0.2.36
+alpha_vantage>=2.3.1
+
+# Dashboard & Visualization
+plotly>=5.18.0
+dash>=2.14.0
+dash-bootstrap-components>=1.5.0
+
+# AI / LLM
+google-genai>=2.30.1
+
+# Backtesting
+vectorbt>=0.26.2
+
+# Database & Storage
+sqlalchemy>=2.0.0
+
+# Config & Environment
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Networking & Utilities
+requests>=2.31.0
+pytz>=2024.1
+
+# Logging
+colorlog>=6.8.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0

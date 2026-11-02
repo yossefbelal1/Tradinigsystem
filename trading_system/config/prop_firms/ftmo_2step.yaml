@@ -1,0 +1,27 @@
+name: "FTMO (2-Step Evaluation)"
+platform: "MetaTrader 5"
+mt5_compatible: true
+supported_instruments: ["Forex", "Metals", "Indices", "Commodities", "Crypto"]
+phases: 2
+
+# Drawdown architecture
+drawdown_type: "static"           # Static floor from initial balance ($90k on $100k)
+max_drawdown_pct: 10.0            # 10% max allowable loss
+daily_loss_limit_pct: 5.0         # 5% maximum loss per day
+daily_loss_basis: "equity_and_balance" # Evaluated vs 23:59:59 CE(S)T midnight baseline
+
+# Profit milestones
+profit_target_phase1_pct: 10.0
+profit_target_phase2_pct: 5.0
+
+# Time constraints
+min_trading_days: 4
+max_trading_days: null            # Unlimited duration
+
+# Execution permissions
+consistency_rule: false
+news_trading_allowed: true        # Allowed on FTMO Swing (restricted 2m before/after on Standard)
+weekend_holding_allowed: true     # Allowed on FTMO Swing
+scaling_plan: true
+payout_split_pct: 80.0
+first_payout_days: 14

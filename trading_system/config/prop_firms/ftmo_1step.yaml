@@ -1,0 +1,19 @@
+name: "FTMO 1-Step Challenge"
+type: "evaluation"
+phases: 1
+
+drawdown_type: "eod_trailing"  # static | eod_trailing | intraday_trailing
+max_drawdown_pct: 10.0
+daily_loss_limit_pct: 3.0
+daily_loss_basis: "equity"  # equity | balance
+
+profit_target_phase1_pct: 10.0
+profit_target_phase2_pct: null  # single-phase — no second target
+
+min_trading_days: 4
+max_trading_days: 30
+
+consistency_rule: false
+news_trading_allowed: true
+weekend_holding_allowed: true
+scaling_plan: false
