@@ -92,6 +92,7 @@ var SDZone[] g_sd_zones = array.new<SDZone>()
 cur_atr = ta.atr(inp_atr_len)
 atr_safe = math.max(cur_atr, syminfo.mintick * 10)
 cluster_tolerance = atr_safe * inp_cluster_mult
+in_draw_window = (last_bar_index - bar_index) <= 300
 
 // ====================================================================================================
 // 3. FRACTALS + ATR CLUSTERING WITH POLARITY FLIPS & AUTO-PRUNING
@@ -100,7 +101,7 @@ cluster_tolerance = atr_safe * inp_cluster_mult
 f_ph = ta.pivothigh(high, inp_fr_left, inp_fr_right)
 f_pl = ta.pivotlow(low, inp_fr_left, inp_fr_right)
 
-if not na(f_ph)
+if not na(f_ph) and in_draw_window
     float pivot_val = f_ph
     int pivot_bar   = bar_index - inp_fr_right
     bool merged     = false
@@ -121,6 +122,12 @@ if not na(f_ph)
                 break
                 
     if not merged
+        if array.size(g_sr_zones) >= 12
+            SRZone oldest = array.shift(g_sr_zones)
+            if not na(oldest.bx)
+                box.delete(oldest.bx)
+                label.delete(oldest.lbl)
+
         float top_p = pivot_val
         float bot_p = pivot_val - (atr_safe * 0.15)
         box bx = na
@@ -133,7 +140,7 @@ if not na(f_ph)
                                   role="RESISTANCE", start_bar=pivot_bar, is_active=true)
         array.push(g_sr_zones, new_z)
 
-if not na(f_pl)
+if not na(f_pl) and in_draw_window
     float pivot_val = f_pl
     int pivot_bar   = bar_index - inp_fr_right
     bool merged     = false
@@ -154,6 +161,12 @@ if not na(f_pl)
                 break
                 
     if not merged
+        if array.size(g_sr_zones) >= 12
+            SRZone oldest = array.shift(g_sr_zones)
+            if not na(oldest.bx)
+                box.delete(oldest.bx)
+                label.delete(oldest.lbl)
+
         float top_p = pivot_val + (atr_safe * 0.15)
         float bot_p = pivot_val
         box bx = na
@@ -167,7 +180,7 @@ if not na(f_pl)
         array.push(g_sr_zones, new_z)
 
 // Bar-Close Polarity Flips & Auto-Deletion of Violated Levels
-if barstate.isconfirmed and array.size(g_sr_zones) > 0
+if barstate.isconfirmed and in_draw_window and array.size(g_sr_zones) > 0
     for i = array.size(g_sr_zones) - 1 to 0
         SRZone z = array.get(g_sr_zones, i)
         if z.is_active
@@ -212,7 +225,7 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0
                     array.remove(g_sr_zones, i)
 
 // Dynamic Proximity Filter (Show Only Nearest N Above/Below Price)
-if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
+if barstate.isconfirmed and (last_bar_index - bar_index <= 5) and array.size(g_sr_zones) > 0 and inp_show_sr
     for i = 0 to array.size(g_sr_zones) - 1
         SRZone z = array.get(g_sr_zones, i)
         if z.is_active and not na(z.bx)
@@ -253,8 +266,14 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
 candle_body = math.abs(close - open)
 is_displacement = candle_body >= (atr_safe * inp_disp_mult)
 
-if is_displacement
+if is_displacement and in_draw_window
     if close > open and close[1] < open[1]
+        if array.size(g_sd_zones) >= 8
+            SDZone oldest = array.shift(g_sd_zones)
+            if not na(oldest.bx)
+                box.delete(oldest.bx)
+                label.delete(oldest.lbl)
+
         float dem_top = math.max(open[1], close[1])
         float dem_bot = low[1]
         box bx = na
@@ -267,6 +286,12 @@ if is_displacement
         array.push(g_sd_zones, new_sd)
         
     else if close < open and close[1] > open[1]
+        if array.size(g_sd_zones) >= 8
+            SDZone oldest = array.shift(g_sd_zones)
+            if not na(oldest.bx)
+                box.delete(oldest.bx)
+                label.delete(oldest.lbl)
+
         float sup_top = high[1]
         float sup_bot = math.min(open[1], close[1])
         box bx = na
@@ -278,7 +303,7 @@ if is_displacement
         SDZone new_sd = SDZone.new(bx=bx, lbl=lb, top=sup_top, bottom=sup_bot, kind="SUPPLY", state="FRESH", start_bar=bar_index - 1, is_active=true)
         array.push(g_sd_zones, new_sd)
 
-if barstate.isconfirmed and array.size(g_sd_zones) > 0
+if barstate.isconfirmed and in_draw_window and array.size(g_sd_zones) > 0
     for i = array.size(g_sd_zones) - 1 to 0
         SDZone sd = array.get(g_sd_zones, i)
         if sd.is_active

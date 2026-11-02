@@ -26,6 +26,7 @@ indicator("Universal Trading Intelligence Analyst [Pine v6]", shorttitle="AGY_An
 // --- Group: Support & Resistance (Fractals + ATR) ---
 grp_sr          = "=== SUPPORT & RESISTANCE (FRACTALS + ATR CLUSTERING) ==="
 inp_show_sr     = input.bool(true, "Show Support & Resistance Zones", group=grp_sr)
+inp_lookback_bars = input.int(300, "Historical Visual Lookback (Bars)", minval=50, maxval=1000, group=grp_sr, tooltip="Limits drawing calculations to recent bars for ultra-fast execution under TradingView timeouts")
 inp_fr_left     = input.int(2, "Fractal Left Bars", minval=1, maxval=10, group=grp_sr, tooltip="Bars to the left of swing peak")
 inp_fr_right    = input.int(2, "Fractal Right Bars", minval=1, maxval=10, group=grp_sr, tooltip="Bars to the right of swing peak")
 inp_atr_len     = input.int(14, "ATR Period for Clustering", minval=1, group=grp_sr)
@@ -125,6 +126,7 @@ var SDZone[] g_sd_zones = array.new<SDZone>()
 // Volatility reference
 cur_atr = ta.atr(inp_atr_len)
 atr_safe = math.max(cur_atr, syminfo.mintick * 10)
+in_draw_window = (last_bar_index - bar_index) <= inp_lookback_bars
 
 // ====================================================================================================
 // 4. NON-REPAINTING MAJOR PERIODIC LEVELS
@@ -172,7 +174,7 @@ f_pl = ta.pivotlow(low, inp_fr_left, inp_fr_right)
 cluster_tolerance = atr_safe * inp_cluster_mult
 
 // 5.1. Register new fractal turning points into clusters
-if not na(f_ph) and inp_show_sr
+if not na(f_ph) and inp_show_sr and in_draw_window
     float pivot_val = f_ph
     int pivot_bar   = bar_index - inp_fr_right
     bool merged     = false
@@ -195,6 +197,12 @@ if not na(f_ph) and inp_show_sr
                 break
                 
     if not merged
+        // Keep active levels bounded to max 12
+        if array.size(g_sr_zones) >= 12
+            SRZone oldest = array.shift(g_sr_zones)
+            box.delete(oldest.bx)
+            label.delete(oldest.lbl)
+
         // Create new Resistance level
         float top_p = pivot_val
         float bot_p = pivot_val - (atr_safe * 0.15)
@@ -204,7 +212,7 @@ if not na(f_ph) and inp_show_sr
                                   role="RESISTANCE", start_bar=pivot_bar, is_active=true)
         array.push(g_sr_zones, new_z)
 
-if not na(f_pl) and inp_show_sr
+if not na(f_pl) and inp_show_sr and in_draw_window
     float pivot_val = f_pl
     int pivot_bar   = bar_index - inp_fr_right
     bool merged     = false
@@ -225,6 +233,11 @@ if not na(f_pl) and inp_show_sr
                 break
                 
     if not merged
+        if array.size(g_sr_zones) >= 12
+            SRZone oldest = array.shift(g_sr_zones)
+            box.delete(oldest.bx)
+            label.delete(oldest.lbl)
+
         // Create new Support level
         float top_p = pivot_val + (atr_safe * 0.15)
         float bot_p = pivot_val
@@ -235,7 +248,7 @@ if not na(f_pl) and inp_show_sr
         array.push(g_sr_zones, new_z)
 
 // 5.2. Live Bar-Close State Machine: Polarity Flips & Auto-Deletion
-if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
+if barstate.isconfirmed and in_draw_window and array.size(g_sr_zones) > 0 and inp_show_sr
     for i = array.size(g_sr_zones) - 1 to 0
         SRZone z = array.get(g_sr_zones, i)
         if z.is_active
@@ -282,7 +295,8 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
                     array.remove(g_sr_zones, i)
 
 // 5.3. Dynamic Proximity & Active Level Visibility Filter (Nearest N Only)
-if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
+// Executed only on the latest bars to guarantee instant execution
+if barstate.isconfirmed and (last_bar_index - bar_index <= 5) and array.size(g_sr_zones) > 0 and inp_show_sr
     for i = 0 to array.size(g_sr_zones) - 1
         SRZone z = array.get(g_sr_zones, i)
         if z.is_active
@@ -331,9 +345,14 @@ if barstate.isconfirmed and array.size(g_sr_zones) > 0 and inp_show_sr
 candle_body = math.abs(close - open)
 is_displacement = candle_body >= (atr_safe * inp_disp_mult)
 
-if is_displacement and inp_show_sd
+if is_displacement and inp_show_sd and in_draw_window
     // Bullish displacement -> Base candle [1] is DEMAND
     if close > open and close[1] < open[1]
+        if array.size(g_sd_zones) >= 8
+            SDZone oldest = array.shift(g_sd_zones)
+            box.delete(oldest.bx)
+            label.delete(oldest.lbl)
+
         float dem_top = math.max(open[1], close[1])
         float dem_bot = low[1]
         box bx = box.new(left=bar_index - 1, top=dem_top, right=bar_index + 20, bottom=dem_bot,
@@ -346,6 +365,11 @@ if is_displacement and inp_show_sd
         
     // Bearish displacement -> Base candle [1] is SUPPLY
     else if close < open and close[1] > open[1]
+        if array.size(g_sd_zones) >= 8
+            SDZone oldest = array.shift(g_sd_zones)
+            box.delete(oldest.bx)
+            label.delete(oldest.lbl)
+
         float sup_top = high[1]
         float sup_bot = math.min(open[1], close[1])
         box bx = box.new(left=bar_index - 1, top=sup_top, right=bar_index + 20, bottom=sup_bot,
@@ -357,7 +381,7 @@ if is_displacement and inp_show_sd
         array.push(g_sd_zones, new_sd)
 
 // Check mitigation of active Supply & Demand zones
-if barstate.isconfirmed and array.size(g_sd_zones) > 0 and inp_show_sd
+if barstate.isconfirmed and in_draw_window and array.size(g_sd_zones) > 0 and inp_show_sd
     for i = array.size(g_sd_zones) - 1 to 0
         SDZone sd = array.get(g_sd_zones, i)
         if sd.is_active
@@ -397,7 +421,8 @@ if barstate.isconfirmed and array.size(g_sd_zones) > 0 and inp_show_sd
                     label.set_text(sd.lbl, "SUPPLY (Tested)")
 
 // 6.2. Supply & Demand Proximity Filter (Nearest N Only)
-if barstate.isconfirmed and array.size(g_sd_zones) > 0 and inp_show_sd
+// Executed only on the latest bars to guarantee instant execution
+if barstate.isconfirmed and (last_bar_index - bar_index <= 5) and array.size(g_sd_zones) > 0 and inp_show_sd
     int max_per_side = math.max(1, math.floor(inp_max_sd / 2))
     for i = 0 to array.size(g_sd_zones) - 1
         SDZone sd = array.get(g_sd_zones, i)
@@ -465,26 +490,26 @@ break_price_low  = inp_close_break ? close : low
 if not na(last_sh) and break_price_high > last_sh and (inp_close_break ? close[1] <= last_sh : high[1] <= last_sh)
     if market_trend == 1
         bos_bull := true
-        if inp_show_struct
+        if inp_show_struct and in_draw_window
             line.new(last_sh_bar, last_sh, bar_index, last_sh, color=inp_col_bos, style=line.style_dashed, width=1)
             label.new(bar_index, last_sh, "BOS", color=color.new(color.black, 100), textcolor=inp_col_bos, size=size.tiny)
     else
         choch_bull := true
         market_trend := 1
-        if inp_show_struct
+        if inp_show_struct and in_draw_window
             line.new(last_sh_bar, last_sh, bar_index, last_sh, color=inp_col_choch, style=line.style_solid, width=2)
             label.new(bar_index, last_sh, "CHoCH", color=color.new(color.black, 100), textcolor=inp_col_choch, size=size.small)
 
 if not na(last_sl) and break_price_low < last_sl and (inp_close_break ? close[1] >= last_sl : low[1] >= last_sl)
     if market_trend == -1
         bos_bear := true
-        if inp_show_struct
+        if inp_show_struct and in_draw_window
             line.new(last_sl_bar, last_sl, bar_index, last_sl, color=inp_col_bos, style=line.style_dashed, width=1)
             label.new(bar_index, last_sl, "BOS", color=color.new(color.black, 100), textcolor=inp_col_bos, size=size.tiny)
     else
         choch_bear := true
         market_trend := -1
-        if inp_show_struct
+        if inp_show_struct and in_draw_window
             line.new(last_sl_bar, last_sl, bar_index, last_sl, color=inp_col_choch, style=line.style_solid, width=2)
             label.new(bar_index, last_sl, "CHoCH", color=color.new(color.black, 100), textcolor=inp_col_choch, size=size.small)
 
@@ -554,7 +579,7 @@ show_bull_signal = (is_bull_pin or is_bull_engulf or is_bull_fakey) and (not inp
 show_bear_signal = (is_bear_pin or is_bear_engulf or is_bear_fakey) and (not inp_gate_pa or f_is_near_resistance())
 
 var string last_pa_name = "NONE"
-if inp_show_pa
+if inp_show_pa and in_draw_window
     if show_bull_signal
         string p_txt = is_bull_pin ? "PIN BAR" : (is_bull_fakey ? "FAKEY" : "ENGULFING")
         last_pa_name := "BULLISH " + p_txt
