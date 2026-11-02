@@ -2,11 +2,11 @@
 //|                                           PRO_CANDLE_CASCADE.mq5 |
 //|                                  Copyright 2026, Antigravity AI  |
 //|    Professional Multi-Timeframe Break & Retest Cascade Engine   |
-//| (W1 Context -> D1 Broken Level in Premium/Discount -> H1 Retest) |
+//|  (W1+D1 Context -> H4 Broken Level in Premium/Discount -> H1)   |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Antigravity AI"
 #property link      "https://github.com/Antigravity-AI"
-#property version   "5.00"
+#property version   "5.50"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -44,6 +44,7 @@ struct SBrokenZone
 input group "=== 1. Execution & Timing Window (Cairo Time) ==="
 input ulong             InpMagicNumber        = 777999;              // Magic Number
 input ENUM_TIMEFRAMES   InpExecTF             = PERIOD_H1;           // Retest Execution Timeframe (H1 or H4)
+input ENUM_TIMEFRAMES   InpStructureTF        = PERIOD_H4;           // Structure & Broken Level Timeframe (H4)
 input bool              InpUseCairoSession    = true;                // Use Cairo Trading Hours (5 PM to Market Close)
 input int               InpCairoStartHour     = 17;                  // Cairo Session Start Hour (17:00 = 5:00 PM)
 input int               InpCairoEndHour       = 23;                  // Cairo Session End Hour (23:00 = Market Close)
@@ -51,9 +52,9 @@ input int               InpMaxTradesPerDay    = 1;                   // Max Trad
 
 input group "=== 2. Multi-Timeframe Structure & Breakout Rules ==="
 input bool              InpRequireW1Confluence= true;                // Require W1 Candle Direction Alignment
-input int               InpD1SwingBars        = 2;                   // D1 Swing Fractal Radius (2 = 5-bar swing)
-input int               InpD1HistoryBars      = 60;                  // D1 History Lookback Bars for Swings
-input double            InpRetestTolerancePct = 0.05;                // Retest Tolerance (% of ATR or price)
+input int               InpH4SwingBars        = 2;                   // H4 Swing Fractal Radius (2 = 5-bar swing)
+input int               InpH4HistoryBars      = 120;                 // H4 History Lookback Bars for Swings
+input double            InpRetestTolerancePoints = 180.0;            // Retest Tolerance Points (180 pts = $1.8 on Gold, 18 pts on Nas)
 
 input group "=== 3. Smart Money Dealing Range (Discount vs Premium) ==="
 input bool              InpRequirePremiumDiscount = true;            // Require Retest in Premium (Sell) / Discount (Buy)
@@ -63,7 +64,7 @@ input group "=== 4. Risk & Target Management (FundingPips Compliant) ==="
 input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Mode
 input double            InpRiskPercent        = 2.0;                 // Risk Percent per Trade (2.0%)
 input double            InpFixedLot           = 0.01;                // Fixed Lot Size
-input double            InpSLBufferDollars    = 2.0;                 // Stop Loss Buffer ($2 on Gold, 25-35 on Nas)
+input double            InpSLBufferDollars    = 2.5;                 // Stop Loss Buffer ($2.5 on Gold, 35 on Nas)
 input double            InpRR_Ratio           = 1.5;                 // TP1 Risk-to-Reward Ratio (1:1.5)
 input bool              InpEnableRunnerTP     = true;                // Enable TP2 Runner to Impulse Floor/Ceiling
 input double            InpMaxSpreadPoints    = 500.0;               // Max Allowed Spread (Points)
@@ -71,7 +72,7 @@ input double            InpMaxSpreadPoints    = 500.0;               // Max Allo
 input group "=== 5. Prop Firm Guardian ==="
 input double            InpMaxDailyLossPct    = 4.0;                 // Max Daily Drawdown Circuit Breaker (4.0%)
 input bool              InpShowDashboard      = false;               // Show Visual Dashboard
-input bool              InpDebugLog           = true;                // Diagnostic Logging
+input bool              InpDebugLog           = false;               // Diagnostic Logging
 
 //--- Global Objects & State
 CTrade         m_trade;
@@ -123,7 +124,7 @@ int OnInit()
    g_dailyCircuitBreaker = false;
    ArrayResize(g_zones, 0);
 
-   Print("PRO CANDLE CASCADE V5.0 (Break & Retest in Premium/Discount) Initialized on ", _Symbol);
+   Print("PRO CANDLE CASCADE V5.5 (H4 Break & Retest in Premium/Discount) Initialized on ", _Symbol);
    return(INIT_SUCCEEDED);
 }
 
@@ -168,16 +169,16 @@ void CheckDailyReset()
 }
 
 //+------------------------------------------------------------------+
-//| Scan D1 Structure for Broken Levels                              |
+//| Scan H4 Structure for Broken Levels                              |
 //+------------------------------------------------------------------+
 void UpdateBrokenStructureZones()
 {
-   MqlRates d_rates[];
-   ArraySetAsSeries(d_rates, true);
-   int copied = CopyRates(_Symbol, PERIOD_D1, 1, InpD1HistoryBars, d_rates);
+   MqlRates h4_rates[];
+   ArraySetAsSeries(h4_rates, true);
+   int copied = CopyRates(_Symbol, InpStructureTF, 1, InpH4HistoryBars, h4_rates);
    if(copied < 10) return;
 
-   int radius = InpD1SwingBars;
+   int radius = InpH4SwingBars;
 
    for(int i = radius; i < copied - radius; i++)
    {
@@ -185,7 +186,7 @@ void UpdateBrokenStructureZones()
       bool isSwingLow = true;
       for(int r = 1; r <= radius; r++)
       {
-         if(d_rates[i].low >= d_rates[i-r].low || d_rates[i].low >= d_rates[i+r].low)
+         if(h4_rates[i].low >= h4_rates[i-r].low || h4_rates[i].low >= h4_rates[i+r].low)
          {
             isSwingLow = false;
             break;
@@ -194,20 +195,19 @@ void UpdateBrokenStructureZones()
 
       if(isSwingLow)
       {
-         double swingLowPrice = d_rates[i].low;
-         datetime swingTime   = d_rates[i].time;
+         double swingLowPrice = h4_rates[i].low;
 
-         // Check if a subsequent daily bar closed below this swing low
+         // Check if a subsequent H4 bar closed below this swing low
          for(int k = i - 1; k >= 0; k--)
          {
-            if(d_rates[k].close < swingLowPrice)
+            if(h4_rates[k].close < swingLowPrice)
             {
-               // Found break! Check if already in zones
+               // Found break! Check if already recorded
                bool exists = false;
                int totalZones = ArraySize(g_zones);
                for(int z = 0; z < totalZones; z++)
                {
-                  if(MathAbs(g_zones[z].level - swingLowPrice) < (0.5 * _Point))
+                  if(MathAbs(g_zones[z].level - swingLowPrice) < (1.0 * _Point))
                   {
                      exists = true;
                      break;
@@ -220,7 +220,7 @@ void UpdateBrokenStructureZones()
                   double swingHigh = swingLowPrice;
                   for(int m = k; m <= i; m++)
                   {
-                     if(d_rates[m].high > swingHigh) swingHigh = d_rates[m].high;
+                     if(h4_rates[m].high > swingHigh) swingHigh = h4_rates[m].high;
                   }
 
                   int newIdx = ArraySize(g_zones);
@@ -229,13 +229,13 @@ void UpdateBrokenStructureZones()
                   g_zones[newIdx].type            = ZONE_BROKEN_SUPPORT_SELL;
                   g_zones[newIdx].level           = swingLowPrice;
                   g_zones[newIdx].swing_extreme   = swingHigh;
-                  g_zones[newIdx].impulse_extreme = d_rates[k].low;
-                  g_zones[newIdx].break_time      = d_rates[k].time;
+                  g_zones[newIdx].impulse_extreme = h4_rates[k].low;
+                  g_zones[newIdx].break_time      = h4_rates[k].time;
                   g_zones[newIdx].active          = true;
                   g_zones[newIdx].tested          = false;
 
                   if(InpDebugLog)
-                     PrintFormat("Identified Broken Support Zone #%d at %.2f (Swing High: %.2f)",
+                     PrintFormat("Identified Broken H4 Support Zone #%d at %.2f (Swing High: %.2f)",
                                  g_zones[newIdx].id, swingLowPrice, swingHigh);
                }
                break;
@@ -247,7 +247,7 @@ void UpdateBrokenStructureZones()
       bool isSwingHigh = true;
       for(int r = 1; r <= radius; r++)
       {
-         if(d_rates[i].high <= d_rates[i-r].high || d_rates[i].high <= d_rates[i+r].high)
+         if(h4_rates[i].high <= h4_rates[i-r].high || h4_rates[i].high <= h4_rates[i+r].high)
          {
             isSwingHigh = false;
             break;
@@ -256,18 +256,17 @@ void UpdateBrokenStructureZones()
 
       if(isSwingHigh)
       {
-         double swingHighPrice = d_rates[i].high;
-         datetime swingTime    = d_rates[i].time;
+         double swingHighPrice = h4_rates[i].high;
 
          for(int k = i - 1; k >= 0; k--)
          {
-            if(d_rates[k].close > swingHighPrice)
+            if(h4_rates[k].close > swingHighPrice)
             {
                bool exists = false;
                int totalZones = ArraySize(g_zones);
                for(int z = 0; z < totalZones; z++)
                {
-                  if(MathAbs(g_zones[z].level - swingHighPrice) < (0.5 * _Point))
+                  if(MathAbs(g_zones[z].level - swingHighPrice) < (1.0 * _Point))
                   {
                      exists = true;
                      break;
@@ -279,7 +278,7 @@ void UpdateBrokenStructureZones()
                   double swingLow = swingHighPrice;
                   for(int m = k; m <= i; m++)
                   {
-                     if(d_rates[m].low < swingLow) swingLow = d_rates[m].low;
+                     if(h4_rates[m].low < swingLow) swingLow = h4_rates[m].low;
                   }
 
                   int newIdx = ArraySize(g_zones);
@@ -288,13 +287,13 @@ void UpdateBrokenStructureZones()
                   g_zones[newIdx].type            = ZONE_BROKEN_RESIST_BUY;
                   g_zones[newIdx].level           = swingHighPrice;
                   g_zones[newIdx].swing_extreme   = swingLow;
-                  g_zones[newIdx].impulse_extreme = d_rates[k].high;
-                  g_zones[newIdx].break_time      = d_rates[k].time;
+                  g_zones[newIdx].impulse_extreme = h4_rates[k].high;
+                  g_zones[newIdx].break_time      = h4_rates[k].time;
                   g_zones[newIdx].active          = true;
                   g_zones[newIdx].tested          = false;
 
                   if(InpDebugLog)
-                     PrintFormat("Identified Broken Resistance Zone #%d at %.2f (Swing Low: %.2f)",
+                     PrintFormat("Identified Broken H4 Resistance Zone #%d at %.2f (Swing Low: %.2f)",
                                  g_zones[newIdx].id, swingHighPrice, swingLow);
                }
                break;
@@ -479,7 +478,7 @@ void OnTick()
    double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    if(InpMaxSpreadPoints > 0 && spread > InpMaxSpreadPoints) return;
 
-   // 5. Update Broken Structure Zones on D1
+   // 5. Update Broken Structure Zones on H4
    UpdateBrokenStructureZones();
 
    // 6. Check Weekly Bias
@@ -494,13 +493,11 @@ void OnTick()
    double b_high  = h1_rates[0].high;
    double b_low   = h1_rates[0].low;
    double b_close = h1_rates[0].close;
-   double b_open  = h1_rates[0].open;
 
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-   // Determine price tolerance based on instrument
-   double tol = (StringFind(_Symbol, "XAU") >= 0) ? 1.50 : 25.0;
+   double tol = (StringFind(_Symbol, "XAU") >= 0) ? 1.80 : 25.0;
    double slBuffer = InpSLBufferDollars;
 
    // 7. Check Active Zones for Break & Retest Setup
@@ -531,12 +528,15 @@ void OnTick()
             // Retest Rejection: candle closed back below the broken level
             if(b_close <= level)
             {
-               double slPrice = MathMax(g_zones[z].swing_extreme, b_high + slBuffer);
+               double slPrice = b_high + slBuffer;
                double riskDist = slPrice - currentBid;
 
                if(riskDist > 0.5)
                {
-                  double tpPrice = InpEnableRunnerTP ? g_zones[z].impulse_extreme : (currentBid - (riskDist * InpRR_Ratio));
+                  double targetDist = currentBid - g_zones[z].impulse_extreme;
+                  double tpPrice = (InpEnableRunnerTP && targetDist >= (riskDist * InpRR_Ratio)) ? 
+                                   g_zones[z].impulse_extreme : 
+                                   (currentBid - (riskDist * InpRR_Ratio));
                   double lot = CalculateLotSize(riskDist);
 
                   if(m_trade.Sell(lot, _Symbol, currentBid, slPrice, tpPrice, "CASCADE Retest SELL"))
@@ -544,7 +544,7 @@ void OnTick()
                      g_tradesTodayCount++;
                      g_zones[z].tested = true;
                      g_zones[z].active = false;
-                     PrintFormat("PRO CANDLE CASCADE V5: Executed SELL Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
+                     PrintFormat("PRO CANDLE CASCADE V5.5: Executed SELL Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
                                  currentBid, slPrice, riskDist, tpPrice, lot);
                      break;
                   }
@@ -554,7 +554,6 @@ void OnTick()
             else if(b_close > (level + 2.0 * tol))
             {
                g_zones[z].active = false;
-               PrintFormat("Zone #%d Invalidated and Removed (Closed above broken level)", g_zones[z].id);
             }
          }
       }
@@ -578,12 +577,15 @@ void OnTick()
             // Retest Bounce: candle closed back above the broken level
             if(b_close >= level)
             {
-               double slPrice = MathMin(g_zones[z].swing_extreme, b_low - slBuffer);
+               double slPrice = b_low - slBuffer;
                double riskDist = currentAsk - slPrice;
 
                if(riskDist > 0.5)
                {
-                  double tpPrice = InpEnableRunnerTP ? g_zones[z].impulse_extreme : (currentAsk + (riskDist * InpRR_Ratio));
+                  double targetDist = g_zones[z].impulse_extreme - currentAsk;
+                  double tpPrice = (InpEnableRunnerTP && targetDist >= (riskDist * InpRR_Ratio)) ? 
+                                   g_zones[z].impulse_extreme : 
+                                   (currentAsk + (riskDist * InpRR_Ratio));
                   double lot = CalculateLotSize(riskDist);
 
                   if(m_trade.Buy(lot, _Symbol, currentAsk, slPrice, tpPrice, "CASCADE Retest BUY"))
@@ -591,7 +593,7 @@ void OnTick()
                      g_tradesTodayCount++;
                      g_zones[z].tested = true;
                      g_zones[z].active = false;
-                     PrintFormat("PRO CANDLE CASCADE V5: Executed BUY Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
+                     PrintFormat("PRO CANDLE CASCADE V5.5: Executed BUY Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
                                  currentAsk, slPrice, riskDist, tpPrice, lot);
                      break;
                   }
@@ -601,7 +603,6 @@ void OnTick()
             else if(b_close < (level - 2.0 * tol))
             {
                g_zones[z].active = false;
-               PrintFormat("Zone #%d Invalidated and Removed (Closed below broken level)", g_zones[z].id);
             }
          }
       }
