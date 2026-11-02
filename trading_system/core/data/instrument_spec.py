@@ -517,3 +517,70 @@ class InstrumentDiscovery:
             spread=spec_dict.get("spread", 20.0),
             description=spec_dict.get("description", symbol),
         )
+
+    @classmethod
+    def discover_available_instruments(cls, mt5_connector: Optional[Any] = None) -> List[Dict[str, str]]:
+        """
+        Dynamically discover tradable symbols from connected MT5 broker.
+        Returns formatted dropdown options categorized by asset class.
+        Falls back to comprehensive catalog when offline.
+        """
+        discovered: List[Dict[str, str]] = []
+        try:
+            import MetaTrader5 as mt5_mod
+            symbols_raw = mt5_mod.symbols_get()
+            if symbols_raw and len(symbols_raw) > 0:
+                # Group symbols by class
+                seen = set()
+                # Prioritize majors, metals, indices, crypto
+                for s in symbols_raw:
+                    name = s.name
+                    if name in seen:
+                        continue
+                    path = getattr(s, "path", "")
+                    ac = cls.classify_asset(name, path)
+                    
+                    # Filter out custom junk or inactive symbols
+                    if not getattr(s, "visible", True) and not getattr(s, "select", False):
+                        # Still allow well-known instruments
+                        if not any(k in name.upper() for k in ["XAU", "EURUSD", "GBPUSD", "USDJPY", "US100", "USTEC", "US30", "BTC"]):
+                            continue
+
+                    icon = "📊"
+                    if ac == AssetClass.METALS:
+                        icon = "🥇" if "XAU" in name.upper() or "GOLD" in name.upper() else "🥈"
+                    elif ac in (AssetClass.FOREX_MAJOR, AssetClass.FOREX_CROSS):
+                        icon = "💱"
+                    elif ac == AssetClass.INDICES:
+                        icon = "📈"
+                    elif ac == AssetClass.COMMODITIES:
+                        icon = "🛢"
+                    elif ac == AssetClass.CRYPTO:
+                        icon = "₿"
+
+                    desc = getattr(s, "description", name)
+                    label = f"{icon} {name} ({desc})"
+                    discovered.append({"label": label, "value": name})
+                    seen.add(name)
+
+                if discovered:
+                    return discovered
+        except Exception:
+            pass
+
+        # Fallback curated list
+        return [
+            {"label": "🥇 Metals: XAUUSD (Gold)", "value": "XAUUSD"},
+            {"label": "🥈 Metals: XAGUSD (Silver)", "value": "XAGUSD"},
+            {"label": "💶 Forex: EURUSD (Euro / USD)", "value": "EURUSD"},
+            {"label": "💷 Forex: GBPUSD (Pound / USD)", "value": "GBPUSD"},
+            {"label": "💴 Forex: USDJPY (USD / Yen)", "value": "USDJPY"},
+            {"label": "🇦🇺 Forex: AUDUSD (Aussie / USD)", "value": "AUDUSD"},
+            {"label": "📈 Index: USTEC / US100 (Nasdaq)", "value": "USTEC"},
+            {"label": "🏛 Index: US30 (Dow Jones)", "value": "US30"},
+            {"label": "📊 Index: US500 (S&P 500)", "value": "US500"},
+            {"label": "🛢 Commod: USOIL (WTI Crude)", "value": "USOIL"},
+            {"label": "₿ Crypto: BTCUSD (Bitcoin)", "value": "BTCUSD"},
+            {"label": "Ξ Crypto: ETHUSD (Ethereum)", "value": "ETHUSD"},
+        ]
+

@@ -1,4 +1,6 @@
 name: "Topstep (CME Futures Trading Combine)"
+official_source: "https://help.topstep.com/"
+verification_date: "2026-10-15"
 platform: "cme_futures"
 mt5_compatible: false
 futures_warning: "WARNING: Topstep operates exclusively on CME/COMEX/NYMEX Futures (GC, NQ, ES, CL, 6E) via Tradovate/NinjaTrader. It does NOT support MT5 or spot Forex/CFD."
@@ -19,8 +21,12 @@ profit_target_phase2_pct: null
 min_trading_days: null
 max_trading_days: null
 
-# Execution permissions
-consistency_rule: true             # Best day must be < 50% of total profits
-news_trading_allowed: true
-weekend_holding_allowed: false     # STRICT: Flat before 15:10 CT market close
-scaling_plan: true
+verified_rules:
+  - "NOT COMPATIBLE with MetaTrader 5 (CME Futures only via Tradovate/NinjaTrader)"
+  - "EOD Trailing Maximum Loss limit (ratchets up based on end-of-day balance)"
+  - "Trailing stop locks in at initial balance once profit target is reached"
+  - "Consistency target: Best day profit cannot exceed 50% of total profit target"
+  - "Mandatory flatten all positions before 15:10 CT daily close"
+
+assumed_rules:
+  - "Contract margin limits as posted on Topstep instrument specification table"

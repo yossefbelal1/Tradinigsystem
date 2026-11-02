@@ -1,11 +1,12 @@
 """
-risk/prop_firm/rules_engine.py
-==============================
+trading_system/risk/prop_firm/rules_engine.py
+=============================================
 Proprietary Trading Firm Rules Engine.
 CRITICAL QUANTITATIVE DIFFERENTIATOR:
 Implements exact, firm-specific drawdown algorithms (Static vs. End-of-Day Trailing vs. Live Intraday Trailing).
 Never confuses static floors with trailing ratchets.
 Continuously calculates remaining daily and total risk capacity to prevent rule breaches.
+Dynamically initializes account balance baseline (no fixed $100k assumption).
 """
 
 from __future__ import annotations
@@ -27,15 +28,23 @@ class PropFirmRulesEngine:
     Simulates and enforces exact evaluation and funded account rules for proprietary trading firms.
     """
 
-    def __init__(self, config_path_or_name: Optional[str] = "ftmo_2step"):
+    def __init__(
+        self,
+        config_path_or_name: Optional[str] = "ftmo_2step",
+        initial_balance: Optional[float] = None,
+    ):
         self.config: dict[str, Any] = {}
         self.load_config(config_path_or_name)
 
-        # State tracking
-        self.starting_balance: float = 100000.0
-        self.hwm_eod: float = 100000.0
-        self.hwm_intraday: float = 100000.0
-        self.daily_starting_equity: float = 100000.0
+        # State tracking — dynamically initialized from broker account telemetry
+        self._initialized: bool = False
+        self.starting_balance: float = float(initial_balance) if (initial_balance and initial_balance > 0) else 0.0
+        self.hwm_eod: float = self.starting_balance
+        self.hwm_intraday: float = self.starting_balance
+        self.daily_starting_equity: float = self.starting_balance
+        if self.starting_balance > 0:
+            self._initialized = True
+
         self.is_breached: bool = False
         self.breach_reason: Optional[str] = None
 
@@ -60,22 +69,35 @@ class PropFirmRulesEngine:
             logger.warning("Prop firm config '%s' not found. Using standard FTMO 2-step defaults.", config_name_or_path)
             self._load_default_ftmo_config()
 
+    def reset_baseline(self, balance: float, equity: Optional[float] = None) -> None:
+        """Explicitly reset the account initial baseline."""
+        if balance <= 0:
+            return
+        eq = equity if (equity is not None and equity > 0) else balance
+        self.starting_balance = balance
+        self.hwm_eod = balance
+        self.hwm_intraday = max(balance, eq)
+        self.daily_starting_equity = balance
+        self._initialized = True
+        self.is_breached = False
+        self.breach_reason = None
+        logger.info("Prop firm baseline initialized: Starting Balance=$%.2f, Daily Baseline=$%.2f", balance, balance)
+
     def update_account_state(
         self,
         account_info: dict[str, Any],
         is_new_day: bool = False,
     ) -> None:
         """
-        Update the internal equity tracking state with live account data.
+        Update internal equity tracking state with live account data.
         """
-        equity = float(account_info.get("equity", 100000.0))
-        balance = float(account_info.get("balance", 100000.0))
+        equity = float(account_info.get("equity", 0.0))
+        balance = float(account_info.get("balance", 0.0))
 
         if self.starting_balance <= 0:
-            self.starting_balance = balance
-            self.hwm_eod = balance
-            self.hwm_intraday = max(balance, equity)
-            self.daily_starting_equity = equity
+            if balance > 0:
+                self.reset_baseline(balance, equity)
+            return
 
         # Track live intraday high water mark
         if equity > self.hwm_intraday:
@@ -85,13 +107,29 @@ class PropFirmRulesEngine:
         if is_new_day:
             self.daily_starting_equity = equity
             self.hwm_eod = max(self.hwm_eod, balance)
+            logger.info("Daily rollover: new daily starting equity = $%.2f", equity)
 
     def get_current_limits(self, account_info: dict[str, Any]) -> dict[str, Any]:
         """
         Calculate live drawdown floors, remaining daily risk, and breach state.
         """
-        equity = float(account_info.get("equity", self.starting_balance))
-        balance = float(account_info.get("balance", self.starting_balance))
+        equity = float(account_info.get("equity", 0.0))
+        balance = float(account_info.get("balance", 0.0))
+
+        # Lazy initialize if not already done
+        if self.starting_balance <= 0:
+            if balance > 0:
+                self.reset_baseline(balance, equity)
+            else:
+                self.starting_balance = 100000.0
+                self.daily_starting_equity = 100000.0
+                self.hwm_intraday = 100000.0
+                self.hwm_eod = 100000.0
+
+        if equity <= 0:
+            equity = self.starting_balance
+        if balance <= 0:
+            balance = self.starting_balance
 
         dd_type = str(self.config.get("drawdown_type", DrawdownType.STATIC.value)).lower()
         max_dd_pct = float(self.config.get("max_drawdown_pct", 10.0))
@@ -117,7 +155,8 @@ class PropFirmRulesEngine:
 
         # ── 2. Calculate Daily Loss Limit ───────────────────────────────────
         daily_basis = str(self.config.get("daily_loss_basis", "equity")).lower()
-        ref_daily = self.daily_starting_equity if daily_basis == "equity" else balance
+        # Daily baseline is start-of-day equity or balance
+        ref_daily = self.daily_starting_equity if "equity" in daily_basis else balance
         daily_loss_floor = ref_daily * (1.0 - (daily_loss_pct / 100.0))
 
         daily_remaining_usd = max(0.0, equity - daily_loss_floor)
@@ -127,7 +166,8 @@ class PropFirmRulesEngine:
         # ── 3. Profit Target Progress ───────────────────────────────────────
         target_balance = self.starting_balance * (1.0 + (target_pct / 100.0))
         profit_usd = equity - self.starting_balance
-        profit_progress_pct = round((profit_usd / (target_balance - self.starting_balance)) * 100.0, 1)
+        denom = max(target_balance - self.starting_balance, 1.0)
+        profit_progress_pct = round((profit_usd / denom) * 100.0, 1)
 
         # ── 4. Breach Detection & Platform Verification ─────────────────────
         is_breached = False
@@ -162,6 +202,7 @@ class PropFirmRulesEngine:
             "mt5_compatible": mt5_comp,
             "supported_instruments": self.config.get("supported_instruments", []),
             "drawdown_type": dd_type,
+            "starting_balance": self.starting_balance,
             "max_allowed_drawdown_floor": round(max_dd_floor, 2),
             "current_drawdown_pct": current_dd_pct,
             "remaining_drawdown_usd": round(remaining_dd_usd, 2),
@@ -215,14 +256,16 @@ class PropFirmRulesEngine:
 
     def _load_default_ftmo_config(self) -> None:
         self.config = {
-            "name": "FTMO 2-Step Challenge",
+            "name": "FTMO (2-Step Evaluation)",
+            "official_source": "https://ftmo.com/en/trading-objectives/",
+            "verified_date": "2026-10-15",
             "type": "evaluation",
             "drawdown_type": "static",
             "max_drawdown_pct": 10.0,
             "daily_loss_limit_pct": 5.0,
-            "daily_loss_basis": "equity",
+            "daily_loss_basis": "equity_and_balance",
             "profit_target_phase1_pct": 10.0,
             "profit_target_phase2_pct": 5.0,
             "min_trading_days": 4,
-            "max_trading_days": 30,
+            "max_trading_days": None,
         }

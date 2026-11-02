@@ -1,4 +1,6 @@
 name: "Apex Trader Funding (CME Futures)"
+official_source: "https://support.apextraderfunding.com/"
+verification_date: "2026-10-15"
 platform: "cme_futures"
 mt5_compatible: false
 futures_warning: "WARNING: Apex Trader Funding operates exclusively on CME/COMEX/NYMEX Futures (GC, NQ, ES, CL, 6E) via Tradovate/Rithmic. It does NOT support MT5 or spot Forex/CFD."
@@ -19,8 +21,13 @@ profit_target_phase2_pct: null
 min_trading_days: null
 max_trading_days: null
 
-# Execution permissions
-consistency_rule: false
-news_trading_allowed: true
-weekend_holding_allowed: false     # STRICT: Overnight/weekend positions prohibited
-scaling_plan: true
+verified_rules:
+  - "NOT COMPATIBLE with MetaTrader 5 (CME Futures only via Rithmic/Tradovate)"
+  - "Intraday Trailing Threshold trails the highest peak unrealized profit in real-time"
+  - "Trailing threshold stops trailing at starting balance + $100"
+  - "No daily loss limit during evaluation"
+  - "Positions must be closed before 16:59 ET"
+  - "News trading allowed"
+
+assumed_rules:
+  - "Contracts allowed scaled by account size tier (e.g. 10 contracts on $50k)"

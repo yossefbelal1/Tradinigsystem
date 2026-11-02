@@ -1,14 +1,16 @@
 name: "FundedNext (Stellar 2-Step)"
+official_source: "https://fundednext.com/stellar-challenge/"
+verification_date: "2026-10-15"
 platform: "MetaTrader 5"
 mt5_compatible: true
-supported_instruments: ["Forex", "Metals", "Indices", "Commodities", "Crypto"]
+supported_instruments: ["Forex", "Metals", "Indices", "Crypto"]
 phases: 2
 
 # Drawdown architecture
-drawdown_type: "static"           # Static 10% calculated from initial deposit
+drawdown_type: "static"           # Static 10% maximum drawdown
 max_drawdown_pct: 10.0
 daily_loss_limit_pct: 5.0
-daily_loss_basis: "balance"       # Based on start-of-day balance
+daily_loss_basis: "balance"       # Based on starting daily balance (Stellar model)
 
 # Profit milestones
 profit_target_phase1_pct: 8.0
@@ -18,11 +20,15 @@ profit_target_phase2_pct: 5.0
 min_trading_days: 5
 max_trading_days: null
 
-# Execution permissions
-consistency_rule: false
-news_trading_allowed: true
-weekend_holding_allowed: true
-scaling_plan: true
-payout_split_pct: 85.0
-first_payout_days: 14
-challenge_profit_share_pct: 15.0
+verified_rules:
+  - "Balance-based daily drawdown calculation of 5%"
+  - "Overall maximum loss limit of 10% from starting balance"
+  - "Phase 1 profit target 8%, Phase 2 profit target 5%"
+  - "Minimum 5 trading days per phase"
+  - "No maximum time limit"
+  - "News trading and weekend holding permitted"
+  - "Up to 90% profit split"
+
+assumed_rules:
+  - "Reset at 00:00 server time"
+  - "Account currency is USD"

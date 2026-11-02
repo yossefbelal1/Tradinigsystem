@@ -1,19 +1,31 @@
-name: "FTMO 1-Step Challenge"
-type: "evaluation"
+name: "FTMO (Evaluation 1-Step Trial)"
+official_source: "https://ftmo.com/en/free-trial/"
+verification_date: "2026-10-15"
+platform: "MetaTrader 5"
+mt5_compatible: true
+supported_instruments: ["Forex", "Metals", "Indices", "Commodities", "Crypto"]
 phases: 1
 
-drawdown_type: "eod_trailing"  # static | eod_trailing | intraday_trailing
+# Drawdown architecture
+drawdown_type: "static"
 max_drawdown_pct: 10.0
-daily_loss_limit_pct: 3.0
-daily_loss_basis: "equity"  # equity | balance
+daily_loss_limit_pct: 5.0
+daily_loss_basis: "equity_and_balance"
 
-profit_target_phase1_pct: 10.0
-profit_target_phase2_pct: null  # single-phase — no second target
+# Profit milestones
+profit_target_phase1_pct: 5.0
+profit_target_phase2_pct: null
 
-min_trading_days: 4
-max_trading_days: 30
+# Time constraints
+min_trading_days: 2
+max_trading_days: 14
 
-consistency_rule: false
-news_trading_allowed: true
-weekend_holding_allowed: true
-scaling_plan: false
+verified_rules:
+  - "Static 10% maximum loss from starting balance"
+  - "5% maximum daily loss from day opening equity/balance"
+  - "Profit target 5%"
+  - "Minimum 2 active trading days"
+  - "14-day duration"
+
+assumed_rules:
+  - "Trial parameters mirror standard FTMO execution conditions"

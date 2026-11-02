@@ -2,8 +2,9 @@
 core/data/data_provider.py
 ==========================
 Unified multi-timeframe market data provider.
-Integrates MT5 real-time data with intelligent fallback to Yahoo Finance (GC=F)
-and Alpha Vantage. Ensures incomplete candles are strictly flagged as unconfirmed.
+Integrates MT5 real-time data with strict Data Integrity governance.
+Ensures incomplete candles are strictly flagged as unconfirmed.
+Never silently presents synthetic or fallback data as live MT5 telemetry.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from trading_system.config.settings import (
     TIMEFRAME_SECONDS,
     YFINANCE_SYMBOL_MAP,
 )
+from trading_system.core.data.data_integrity import DataIntegrityManager, DataSourceState
 from trading_system.core.data.mt5_connector import MT5Connector
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 class DataProvider:
     """
     Unified market data engine providing multi-timeframe OHLCV data.
-    Attempts MT5 first; seamlessly falls back to yfinance or cached data.
+    Enforces strict Data Integrity: Live trade plans require authoritative MT5 connection.
     """
 
     def __init__(
@@ -41,6 +43,8 @@ class DataProvider:
         mt5_connector: Optional[MT5Connector] = None,
         use_cache: bool = True,
         cache_dir: Optional[Path] = None,
+        integrity_manager: Optional[DataIntegrityManager] = None,
+        is_demo_mode: bool = False,
     ):
         self.mt5 = mt5_connector
         self.use_cache = use_cache
@@ -48,19 +52,54 @@ class DataProvider:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._last_source: dict[str, str] = {}
 
+        # Authoritative Data Integrity Manager
+        self.integrity = integrity_manager or DataIntegrityManager()
+        if self.is_mt5_connected:
+            self.integrity.set_state(DataSourceState.MT5_LIVE, reason="MT5 active live connection")
+        elif is_demo_mode:
+            self.integrity.set_state(DataSourceState.DEMO_SIMULATED, reason="Explicit demo mode selected")
+        elif self.mt5 is not None:
+            self.integrity.set_state(DataSourceState.OFFLINE_DISCONNECTED, reason="MT5 terminal disconnected")
+        else:
+            self.integrity.set_state(DataSourceState.DEMO_SIMULATED, reason="No MT5 connector configured")
+
     @property
     def is_mt5_connected(self) -> bool:
-        return self.mt5 is not None and self.mt5.is_connected()
+        connected = self.mt5 is not None and self.mt5.is_connected()
+        if connected and self.integrity.state != DataSourceState.MT5_LIVE:
+            self.integrity.set_state(DataSourceState.MT5_LIVE, reason="MT5 connected")
+        elif not connected and self.mt5 is not None and self.integrity.state == DataSourceState.MT5_LIVE:
+            self.integrity.set_state(DataSourceState.OFFLINE_DISCONNECTED, reason="MT5 disconnected")
+        return connected
+
+    @property
+    def data_source_state(self) -> DataSourceState:
+        # Trigger dynamic health check
+        _ = self.is_mt5_connected
+        return self.integrity.state
+
+    @property
+    def is_live_executable(self) -> bool:
+        return self.data_source_state == DataSourceState.MT5_LIVE
+
+    def validate_plan_generation_allowed(self) -> tuple[bool, Optional[str]]:
+        """Gating check ensuring live trade plans are only generated on verified MT5 data."""
+        return self.integrity.validate_plan_generation_allowed()
 
     def get_source_label(self, timeframe: str) -> str:
-        return self._last_source.get(timeframe, "UNKNOWN")
+        return self._last_source.get(timeframe, self.integrity.state.value)
 
     def get_current_price(self, symbol: str = SYMBOL) -> float:
         """Get the latest real-time or near-real-time price for symbol."""
         if self.is_mt5_connected:
             tick = self.mt5.get_tick(symbol)
             if tick and "bid" in tick and tick["bid"] > 0:
+                self.integrity.record_tick()
                 return float((tick["bid"] + tick["ask"]) / 2.0 if "ask" in tick else tick["bid"])
+
+        # If MT5 is disconnected, log integrity warning
+        if self.mt5 is not None:
+            self.integrity.set_state(DataSourceState.OFFLINE_DISCONNECTED, reason="get_tick failed on MT5")
 
         # Fallback via Daily or M15 candle close
         df = self.get_ohlcv(symbol, "M15", count=2)
@@ -103,22 +142,27 @@ class DataProvider:
         df = pd.DataFrame()
         source = "NONE"
 
-        # 1. Try MT5
+        # 1. Try MT5 Live authoritative data
         if self.is_mt5_connected:
             try:
                 df = self.mt5.get_ohlcv(symbol, timeframe, count=count)
                 if not df.empty:
                     source = "MT5_LIVE"
                     self._last_source[timeframe] = source
+                    self.integrity.set_state(DataSourceState.MT5_LIVE, reason="Live MT5 OHLCV stream")
             except Exception as e:
                 logger.warning("MT5 get_ohlcv error for %s %s: %s", symbol, timeframe, e)
+                if self.mt5 is not None:
+                    self.integrity.set_state(DataSourceState.OFFLINE_DISCONNECTED, reason=f"MT5 stream error: {e}")
 
-        # 2. Try yfinance fallback
+        # 2. Try yfinance fallback (Strictly marked as non-authoritative)
         if df.empty:
             df = self._fetch_yfinance(symbol, timeframe, count=count)
             if not df.empty:
-                source = "YFINANCE"
+                source = "YFINANCE_FALLBACK"
                 self._last_source[timeframe] = source
+                if self.integrity.state != DataSourceState.HISTORICAL_BACKTEST:
+                    self.integrity.set_state(DataSourceState.DEMO_SIMULATED, reason="Yahoo Finance fallback used")
 
         # 3. If still empty, try disk cache
         if df.empty and self.use_cache:
@@ -132,6 +176,8 @@ class DataProvider:
             df = self._generate_synthetic_data(symbol, timeframe, count=count)
             source = "DEMO_SIMULATION"
             self._last_source[timeframe] = source
+            if self.integrity.state != DataSourceState.HISTORICAL_BACKTEST:
+                self.integrity.set_state(DataSourceState.DEMO_SIMULATED, reason="Synthetic demo data generated")
 
         if df.empty:
             logger.error("Failed to retrieve market data for %s %s from any source.", symbol, timeframe)
@@ -142,7 +188,7 @@ class DataProvider:
         df = self.flag_incomplete_candle(df, timeframe)
 
         # Cache on disk
-        if self.use_cache and source in ("MT5_LIVE", "YFINANCE"):
+        if self.use_cache and source in ("MT5_LIVE", "YFINANCE_FALLBACK"):
             self._save_to_cache(symbol, timeframe, df)
 
         return df
@@ -198,189 +244,176 @@ class DataProvider:
 
         # If elapsed time since candle start is less than the timeframe duration, it's still forming!
         if elapsed_seconds < period_seconds:
-            df.loc[df.index[-1], "is_confirmed"] = False
-            logger.debug(
-                "Timeframe %s last candle is FORMING (elapsed %ds / period %ds)",
-                timeframe, int(elapsed_seconds), period_seconds
-            )
+            df.iloc[-1, df.columns.get_loc("is_confirmed")] = False
         else:
-            df.loc[df.index[-1], "is_confirmed"] = True
+            df.iloc[-1, df.columns.get_loc("is_confirmed")] = True
 
         return df
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Internal Fetchers & Helpers
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Fallback Implementations ──────────────────────────────────────────────
 
-    def _fetch_yfinance(self, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
-        """Fetch historical data from Yahoo Finance."""
+    def _fetch_yfinance(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int = 500,
+    ) -> pd.DataFrame:
+        """Fetch historical bars from Yahoo Finance."""
         try:
             import yfinance as yf
         except ImportError:
             logger.warning("yfinance package not installed. Cannot use fallback.")
             return pd.DataFrame()
 
-        yf_ticker = YFINANCE_SYMBOL_MAP.get(symbol, symbol)
-
-        # Map timeframe to yfinance interval and period
-        interval_map = {
-            "MN1": ("1mo", "10y"),
-            "W1":  ("1wk", "5y"),
-            "D1":  ("1d", "2y"),
-            "H4":  ("1h", "730d"),   # yfinance doesn't have 4h, pull 1h and resample
-            "H1":  ("1h", "730d"),
-            "M30": ("30m", "60d"),
-            "M15": ("15m", "60d"),
-            "M5":  ("5m", "60d"),
-            "M1":  ("1m", "7d"),
+        ticker_sym = YFINANCE_SYMBOL_MAP.get(symbol, symbol)
+        yf_interval_map = {
+            "M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
+            "H1": "1h", "H4": "1h", "D1": "1d", "W1": "1wk", "MN1": "1mo",
         }
+        interval = yf_interval_map.get(timeframe, "1h")
 
-        if timeframe not in interval_map:
-            interval, period = "1d", "1y"
-        else:
-            interval, period = interval_map[timeframe]
+        period_map = {
+            "M1": "5d", "M5": "1mo", "M15": "1mo", "M30": "1mo",
+            "H1": "2y", "H4": "2y", "D1": "5y", "W1": "10y", "MN1": "max",
+        }
+        period = period_map.get(timeframe, "1y")
 
         try:
-            logger.debug("Downloading %s via yfinance (interval=%s, period=%s)...", yf_ticker, interval, period)
-            raw = yf.download(
-                tickers=yf_ticker,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=True,
-            )
-
-            if raw is None or raw.empty:
+            ticker = yf.Ticker(ticker_sym)
+            raw = ticker.history(period=period, interval=interval)
+            if raw.empty:
                 return pd.DataFrame()
 
-            # Flatten MultiIndex columns if present
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = [c[0].lower() for c in raw.columns]
-            else:
-                raw.columns = [str(c).lower() for c in raw.columns]
-
             raw = raw.reset_index()
-            # Find date column
-            date_col = next((c for c in raw.columns if "date" in c or "time" in c), raw.columns[0])
-            raw = raw.rename(columns={date_col: "time"})
+            # Standardize column names to lowercase
+            raw.columns = [str(c).lower() for c in raw.columns]
+            rename_map = {"datetime": "time", "date": "time"}
+            raw = raw.rename(columns=rename_map)
 
-            # Handle H4 resample from 1h if needed
-            if timeframe == "H4":
-                raw["time"] = pd.to_datetime(raw["time"])
-                raw = raw.set_index("time").resample("4h").agg({
-                    "open": "first",
-                    "high": "max",
-                    "low": "min",
-                    "close": "last",
-                    "volume": "sum",
-                }).dropna().reset_index()
+            # Ensure UTC timezone
+            if "time" in raw.columns:
+                raw["time"] = pd.to_datetime(raw["time"], utc=True)
 
-            # Keep only standard columns
-            cols = ["time", "open", "high", "low", "close", "volume"]
-            available_cols = [c for c in cols if c in raw.columns]
-            raw = raw[available_cols]
+            if timeframe == "H4" and interval == "1h" and len(raw) >= 4:
+                raw = self._resample_to_h4(raw)
 
-            # Slice to requested count
-            if len(raw) > count:
-                raw = raw.iloc[-count:].copy()
-
-            return raw.reset_index(drop=True)
+            return raw.tail(count).reset_index(drop=True)
 
         except Exception as e:
-            logger.warning("yfinance fetch error for %s (%s): %s", yf_ticker, timeframe, e)
+            logger.warning("yfinance fetch error for %s (%s): %s", symbol, ticker_sym, e)
             return pd.DataFrame()
 
-    def _standardise_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure standard types, lower-case columns, UTC timestamps."""
-        df = df.copy()
-        df.columns = [str(c).lower() for c in df.columns]
+    def _resample_to_h4(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Resample 1-hour dataframe to 4-hour candles."""
+        if df.empty or "time" not in df.columns:
+            return df
+        df = df.set_index("time")
+        agg_rules = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+        available_rules = {k: v for k, v in agg_rules.items() if k in df.columns}
+        resampled = df.resample("4h").agg(available_rules).dropna().reset_index()
+        return resampled
 
-        if "time" in df.columns:
-            df["time"] = pd.to_datetime(df["time"], utc=True)
+    def _generate_synthetic_data(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int = 500,
+    ) -> pd.DataFrame:
+        """
+        Produce realistic multi-timeframe synthetic OHLCV data for offline demo mode.
+        """
+        from trading_system.core.data.instrument_spec import InstrumentDiscovery
+        spec = InstrumentDiscovery.get_fallback_spec(symbol)
+        digits = spec.digits
 
-        numeric_cols = ["open", "high", "low", "close", "volume"]
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
-        return df
-
-    def _cache_path(self, symbol: str, timeframe: str) -> Path:
-        return self.cache_dir / f"{symbol}_{timeframe}.parquet"
-
-    def _save_to_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
-        try:
-            path = self._cache_path(symbol, timeframe)
-            df.to_parquet(path, index=False)
-        except Exception as e:
-            logger.debug("Failed to cache %s %s to disk: %s", symbol, timeframe, e)
-
-    def _load_from_cache(self, symbol: str, timeframe: str) -> pd.DataFrame:
-        path = self._cache_path(symbol, timeframe)
-        if path.exists():
-            try:
-                df = pd.read_parquet(path)
-                logger.info("Loaded %s %s from disk cache (%d rows)", symbol, timeframe, len(df))
-                return df
-            except Exception as e:
-                logger.warning("Error reading disk cache %s: %s", path, e)
-        return pd.DataFrame()
-
-    def _generate_synthetic_data(self, symbol: str = "XAUUSD", timeframe: str = "H1", count: int = 200) -> pd.DataFrame:
-        """Generate realistic geometric Brownian motion multi-asset OHLCV data for offline demo mode."""
-        seed_val = int(abs(hash(symbol) + hash(timeframe))) % 100000
-        np.random.seed(seed_val)
-        now = datetime.now(timezone.utc)
-        period_sec = TIMEFRAME_SECONDS.get(timeframe, 3600)
-        times = [now - pd.Timedelta(seconds=(count - i) * period_sec) for i in range(count)]
-
-        s_upper = symbol.upper()
-        if "BTC" in s_upper:
-            base_p, vol_p, digits = 80000.0, 450.0, 2
-        elif "ETH" in s_upper:
-            base_p, vol_p, digits = 3200.0, 35.0, 2
-        elif "30" in s_upper:
-            base_p, vol_p, digits = 50000.0, 120.0, 1
-        elif "100" in s_upper or "TEC" in s_upper:
-            base_p, vol_p, digits = 28000.0, 80.0, 2
-        elif "500" in s_upper:
-            base_p, vol_p, digits = 7600.0, 20.0, 2
-        elif "JPY" in s_upper:
-            base_p, vol_p, digits = 155.0, 0.45, 3
-        elif any(f in s_upper for f in ["EUR", "GBP", "AUD", "CAD", "NZD", "CHF"]):
-            base_p, vol_p, digits = 1.1000, 0.0025, 5
-        elif "OIL" in s_upper:
-            base_p, vol_p, digits = 75.0, 0.60, 3
+        if digits == 5:
+            base_price = 1.11500
+            atr_pct = 0.0004
+        elif "JPY" in symbol.upper():
+            base_price = 157.500
+            atr_pct = 0.001
+        elif "30" in symbol.upper():
+            base_price = 44000.0
+            atr_pct = 0.002
+        elif "TEC" in symbol.upper() or "100" in symbol.upper():
+            base_price = 20500.0
+            atr_pct = 0.0025
+        elif "BTC" in symbol.upper():
+            base_price = 92000.0
+            atr_pct = 0.005
         else:
-            base_p, vol_p, digits = 3900.0, 8.0, 2  # Gold
+            base_price = 3900.0
+            atr_pct = 0.003
 
-        returns = np.random.normal(0.0001, 0.003, count)
-        price_curve = base_p * np.exp(np.cumsum(returns))
+        np.random.seed(hash(symbol + timeframe) % (2**31))
 
-        highs = price_curve + np.abs(np.random.normal(vol_p, vol_p * 0.4, count))
-        lows = price_curve - np.abs(np.random.normal(vol_p, vol_p * 0.4, count))
-        closes = price_curve + np.random.normal(0.0, vol_p * 0.3, count)
-        opens = np.roll(closes, 1)
-        opens[0] = price_curve[0]
+        sec_per_bar = TIMEFRAME_SECONDS.get(timeframe, 3600)
+        end_time = datetime.now(timezone.utc)
+        times = [end_time - pd.Timedelta(seconds=sec_per_bar * (count - i)) for i in range(count)]
 
-        delta = max(vol_p * 0.1, 10 ** (-digits))
-        highs = np.maximum(highs, np.maximum(opens, closes) + delta)
-        lows = np.minimum(lows, np.minimum(opens, closes) - delta)
-        volumes = np.random.randint(500, 6000, count)
+        # Generate price series with trending cycles and volatility
+        t = np.linspace(0, 4 * np.pi, count)
+        trend = np.sin(t) * (base_price * 0.03)
+        noise = np.cumsum(np.random.normal(0, base_price * atr_pct * 0.5, count))
+        close = base_price + trend + noise
+
+        high = close + np.abs(np.random.normal(0, base_price * atr_pct, count))
+        low = close - np.abs(np.random.normal(0, base_price * atr_pct, count))
+        open_price = np.roll(close, 1)
+        open_price[0] = base_price
+
+        for i in range(count):
+            high[i] = max(high[i], open_price[i], close[i])
+            low[i] = min(low[i], open_price[i], close[i])
+
+        volume = np.random.randint(100, 5000, size=count).astype(float)
 
         df = pd.DataFrame({
             "time": times,
-            "open": np.round(opens, digits),
-            "high": np.round(highs, digits),
-            "low": np.round(lows, digits),
-            "close": np.round(closes, digits),
-            "volume": volumes,
+            "open": np.round(open_price, digits),
+            "high": np.round(high, digits),
+            "low": np.round(low, digits),
+            "close": np.round(close, digits),
+            "volume": volume,
             "is_confirmed": True,
         })
         df.iloc[-1, df.columns.get_loc("is_confirmed")] = False
         return df
 
-    def _generate_synthetic_gold_data(self, timeframe: str, count: int = 200) -> pd.DataFrame:
-        """Backward compatible helper for gold demo."""
-        return self._generate_synthetic_data(symbol="XAUUSD", timeframe=timeframe, count=count)
+    def _standardise_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure standard types and required columns."""
+        df = df.copy()
+        if "time" in df.columns:
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["open", "high", "low", "close"])
+        return df.reset_index(drop=True)
+
+    def _get_cache_path(self, symbol: str, timeframe: str) -> Path:
+        clean_sym = symbol.replace("/", "_").replace("=", "_")
+        return self.cache_dir / f"{clean_sym}_{timeframe}.parquet"
+
+    def _save_to_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
+        try:
+            p = self._get_cache_path(symbol, timeframe)
+            df.to_parquet(p, index=False)
+        except Exception as e:
+            logger.debug("Could not write cache file: %s", e)
+
+    def _load_from_cache(self, symbol: str, timeframe: str) -> pd.DataFrame:
+        p = self._get_cache_path(symbol, timeframe)
+        if p.exists():
+            try:
+                df = pd.read_parquet(p)
+                return df
+            except Exception as e:
+                logger.debug("Could not read cache file %s: %s", p, e)
+        return pd.DataFrame()

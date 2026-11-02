@@ -1,4 +1,6 @@
 name: "The5ers (High Stakes 2-Step)"
+official_source: "https://the5ers.com/high-stakes/"
+verification_date: "2026-10-15"
 platform: "MetaTrader 5"
 mt5_compatible: true
 supported_instruments: ["Forex", "Metals", "Indices"]
@@ -8,7 +10,7 @@ phases: 2
 drawdown_type: "static"           # Static 10% from initial balance
 max_drawdown_pct: 10.0
 daily_loss_limit_pct: 5.0
-daily_loss_basis: "equity"        # Equity at daily reset
+daily_loss_basis: "equity"        # Equity at 00:00 server time daily reset
 
 # Profit milestones
 profit_target_phase1_pct: 8.0
@@ -18,10 +20,16 @@ profit_target_phase2_pct: 5.0
 min_trading_days: 3
 max_trading_days: null
 
-# Execution permissions
-consistency_rule: false
-news_trading_allowed: true
-weekend_holding_allowed: true
-scaling_plan: true
-payout_split_pct: 80.0
-first_payout_days: 14
+verified_rules:
+  - "Static maximum loss of 10% from initial balance"
+  - "Maximum daily loss of 5% based on day starting equity"
+  - "Phase 1 profit target 8%, Phase 2 profit target 5%"
+  - "Minimum 3 trading days required"
+  - "No maximum time limit"
+  - "Payout split 80% default (scale up to 100%)"
+  - "News trading allowed"
+  - "Weekend holding allowed"
+
+assumed_rules:
+  - "Forex leverage up to 1:100, Metals up to 1:30"
+  - "First payout after 14 days"

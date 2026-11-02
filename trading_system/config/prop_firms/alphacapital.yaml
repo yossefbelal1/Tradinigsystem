@@ -1,27 +1,33 @@
-name: "Alpha Capital Group (Alpha Pro 2-Step)"
+name: "Alpha Capital Group (Alpha Pro)"
+official_source: "https://alphacapitalgroup.uk/evaluations/"
+verification_date: "2026-10-15"
 platform: "MetaTrader 5"
 mt5_compatible: true
 supported_instruments: ["Forex", "Metals", "Indices"]
 phases: 2
 
 # Drawdown architecture
-drawdown_type: "static"           # Max loss locked relative to initial balance
+drawdown_type: "static"           # Static maximum drawdown from initial balance
 max_drawdown_pct: 10.0
 daily_loss_limit_pct: 5.0
-daily_loss_basis: "balance"
+daily_loss_basis: "equity"
 
 # Profit milestones
 profit_target_phase1_pct: 8.0
-profit_target_phase2_pct: 4.0
+profit_target_phase2_pct: 5.0
 
 # Time constraints
 min_trading_days: 0               # No minimum trading days
 max_trading_days: null
 
-# Execution permissions
-consistency_rule: false
-news_trading_allowed: true
-weekend_holding_allowed: true
-scaling_plan: true
-payout_split_pct: 80.0
-first_payout_days: 14
+verified_rules:
+  - "Static 10% maximum total loss limit from starting balance"
+  - "5% daily loss limit based on balance/equity at daily close"
+  - "Phase 1 profit target 8%, Phase 2 profit target 5%"
+  - "Zero minimum trading days requirement"
+  - "No maximum time limit"
+  - "Zero commission on indices"
+  - "80% profit split up to 90%"
+
+assumed_rules:
+  - "Trades routed via ACGFX broker MT5 server"

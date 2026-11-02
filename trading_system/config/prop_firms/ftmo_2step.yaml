@@ -1,4 +1,6 @@
 name: "FTMO (2-Step Evaluation)"
+official_source: "https://ftmo.com/en/trading-objectives/"
+verification_date: "2026-10-15"
 platform: "MetaTrader 5"
 mt5_compatible: true
 supported_instruments: ["Forex", "Metals", "Indices", "Commodities", "Crypto"]
@@ -18,10 +20,16 @@ profit_target_phase2_pct: 5.0
 min_trading_days: 4
 max_trading_days: null            # Unlimited duration
 
-# Execution permissions
-consistency_rule: false
-news_trading_allowed: true        # Allowed on FTMO Swing (restricted 2m before/after on Standard)
-weekend_holding_allowed: true     # Allowed on FTMO Swing
-scaling_plan: true
-payout_split_pct: 80.0
-first_payout_days: 14
+# Execution permissions & verified policies
+verified_rules:
+  - "Static maximum loss of 10% of the initial account balance"
+  - "Maximum daily loss of 5% of starting day equity/balance at 23:59:59 CE(S)T"
+  - "Phase 1 profit target 10%, Phase 2 profit target 5%"
+  - "Minimum 4 active trading days per phase"
+  - "No maximum time limit to complete evaluation"
+  - "Payout split starts at 80% (up to 90% via scaling plan)"
+  - "First payout eligible after 14 calendar days"
+
+assumed_rules:
+  - "News trading allowed on FTMO Swing accounts (restricted on FTMO Standard within 2 minutes of major news)"
+  - "Weekend holding allowed on FTMO Swing accounts"
