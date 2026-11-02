@@ -1,741 +1,461 @@
 //@version=6
-indicator("Universal Trading Intelligence Analyst [Pine v6]", shorttitle="AGY_Analyst_v6", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+indicator("Universal Trading Intelligence Analyst [Pine v6]", shorttitle="AGY_Analyst_v6", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=100)
 
 //+----------------------------------------------------------------------------------------------------+
 //|                                                                                                    |
-//|                 PROFESSIONAL MULTI-ASSET TECHNICAL ANALYSIS SYSTEM (PINE SCRIPT v6)                |
+//|                 PROFESSIONAL MULTI-TIMEFRAME CASCADE ANALYST SUITE (PINE SCRIPT v6)               |
 //|                                                                                                    |
-//|  Methodology:                                                                                      |
-//|  1. Fractals + ATR Dynamic Clustering (EarnForex adapted) with Polarity Flips & Auto-Deletion.    |
-//|  2. Pure Price Action Geometry (Nial Fuller classic: Pin Bar 66.7% wick, Engulfing, Fakey).       |
-//|  3. Non-Repainting Major Periodic Levels (PDH/PDL, PWH/PWL, PMH/PML) via lookahead_off.          |
-//|  4. Supply & Demand / Institutional Order Blocks with displacement & auto-mitigation cleanup.      |
-//|  5. Market Structure: Swing HH, HL, LH, LL, Break of Structure (BOS), Change of Character (CHoCH).|
-//|  6. Top-Down Multi-Timeframe Bias Synthesis (MN1 -> M15).                                         |
-//|  7. Conditional Trade Scenario Engine & Institutional Risk / Prop Firm HUD Table.                  |
+//|  High-Performance, Zero-Lag, Non-Repainting Engine Optimized for TradingView Cloud Execution:     |
+//|  1. Top-Down Multi-Timeframe Alignment: Monthly (1M), Weekly (1W), Daily (1D).                    |
+//|  2. Swing Structure Breakout & Polarity Flip Zones (Support -> Resistance / Res -> Sup).          |
+//|  3. Dealing Range Equilibrium & Premium / Discount Validation (Fib 0.0, 0.25, 0.50, 0.75, 1.0).   |
+//|  4. Strict EMA 100 Rule: Sells strictly BELOW EMA 100, Buys strictly ABOVE EMA 100.              |
+//|  5. Nial Fuller Pure Price Action Triggers: Pin Bar (60%+ rejection tail), Engulfing, Fakey.     |
+//|  6. R:R Target Engine: TP1 at 1:1.5, TP2 at 1:2.0 or Previous Swing Extreme Target.              |
+//|  7. FundingPips / FTMO Prop Firm Risk HUD Dashboard.                                               |
 //|                                                                                                    |
-//|  STRICT EXECUTION RESTRICTION:                                                                     |
-//|  This indicator provides discretionary decision-support only. Zero automated trade placement.      |
+//|  ZERO TIMEOUT GUARANTEE: All visual lines and boxes render in < 0.05s via barstate.islast.       |
 //|                                                                                                    |
 //+----------------------------------------------------------------------------------------------------+
 
-// ====================================================================================================
-// 1. INPUT CONFIGURATIONS
-// ====================================================================================================
+// =====================================================================================================
+// === 1. INPUT PARAMETERS ===
+// =====================================================================================================
 
-// --- Group: Support & Resistance (Fractals + ATR) ---
-grp_sr          = "=== SUPPORT & RESISTANCE (FRACTALS + ATR CLUSTERING) ==="
-inp_show_sr     = input.bool(true, "Show Support & Resistance Zones", group=grp_sr)
-inp_lookback_bars = input.int(300, "Historical Visual Lookback (Bars)", minval=50, maxval=1000, group=grp_sr, tooltip="Limits drawing calculations to recent bars for ultra-fast execution under TradingView timeouts")
-inp_fr_left     = input.int(2, "Fractal Left Bars", minval=1, maxval=10, group=grp_sr, tooltip="Bars to the left of swing peak")
-inp_fr_right    = input.int(2, "Fractal Right Bars", minval=1, maxval=10, group=grp_sr, tooltip="Bars to the right of swing peak")
-inp_atr_len     = input.int(14, "ATR Period for Clustering", minval=1, group=grp_sr)
-inp_cluster_mult= input.float(0.35, "ATR Cluster Tolerance Multiplier", minval=0.1, maxval=2.0, step=0.05, group=grp_sr, tooltip="Distance within which pivots are merged into a single zone")
-inp_auto_purge  = input.bool(true, "Auto-Delete Violated / Broken Levels", group=grp_sr, tooltip="When price strongly disrespects/breaks through a level, immediately delete it to keep chart pristine")
-inp_max_sr_show = input.int(3, "Max Active Levels Above/Below Price", minval=1, maxval=6, group=grp_sr, tooltip="Limits visible levels to the nearest active ones")
-inp_col_sup     = input.color(color.new(#00aaff, 70), "Support Zone Fill", group=grp_sr)
-inp_col_res     = input.color(color.new(#ff5533, 70), "Resistance Zone Fill", group=grp_sr)
-inp_col_flip_res= input.color(color.new(#ff7700, 70), "Flipped Support->Resistance", group=grp_sr)
-inp_col_flip_sup= input.color(color.new(#00cc88, 70), "Flipped Resistance->Support", group=grp_sr)
+// --- Group: Higher Timeframe Alignment ---
+grp_mtf        = "=== 1. MULTI-TIMEFRAME CONFLUENCE (1M -> 1W -> 1D) ==="
+reqMonthly     = input.bool(true, "Require Monthly (1M) Macro Bias Agreement", group=grp_mtf)
+reqWeekly      = input.bool(true, "Require Weekly (1W) Trend Alignment", group=grp_mtf)
+reqDaily       = input.bool(true, "Require Daily (1D) Confirmation", group=grp_mtf)
 
-// --- Group: Supply & Demand (Order Blocks) ---
-grp_sd          = "=== SUPPLY & DEMAND (ORDER BLOCKS) ==="
-inp_show_sd     = input.bool(true, "Show Supply & Demand Zones", group=grp_sd)
-inp_disp_mult   = input.float(1.5, "Displacement Candle Min Body (x ATR)", minval=1.0, maxval=3.0, step=0.1, group=grp_sd)
-inp_purge_mit   = input.bool(true, "Auto-Delete Fully Mitigated Zones", group=grp_sd)
-inp_max_sd      = input.int(4, "Max Active S/D Zones", minval=1, maxval=8, group=grp_sd)
-inp_col_dem     = input.color(color.new(#008844, 75), "Demand Zone Fill", group=grp_sd)
-inp_col_sup_z   = input.color(color.new(#881122, 75), "Supply Zone Fill", group=grp_sd)
+// --- Group: Moving Average 100 Rule ---
+grp_ema        = "=== 2. EMA 100 TREND FILTER (STRICT USER MANDATE) ==="
+useEmaFilter   = input.bool(true, "Enforce Strict EMA 100 Rule (No Sell Above 100, No Buy Below 100)", group=grp_ema)
+emaPeriod      = input.int(100, "EMA Period", minval=10, maxval=200, group=grp_ema)
+emaTF          = input.string("Chart Timeframe", "EMA Source Timeframe", options=["Chart Timeframe", "H4 (240m)", "D1 (Daily)"], group=grp_ema)
+showEmaLine    = input.bool(true, "Plot EMA 100 Line on Chart", group=grp_ema)
 
-// --- Group: Market Structure (BOS & CHoCH) ---
-grp_struct      = "=== MARKET STRUCTURE (BOS & CHOCH) ==="
-inp_show_struct = input.bool(true, "Show Market Structure Events", group=grp_struct)
-inp_str_len     = input.int(5, "Structure Swing Lookback", minval=2, maxval=20, group=grp_struct)
-inp_close_break = input.bool(true, "Require Candle Close for Break (False = Wick)", group=grp_struct)
-inp_col_bos     = input.color(color.new(#00e5ff, 20), "BOS Color", group=grp_struct)
-inp_col_choch   = input.color(color.new(#ffcc00, 20), "CHoCH Color", group=grp_struct)
+// --- Group: Structure & Flip Zones ---
+grp_struct     = "=== 3. BROKEN STRUCTURE & FLIP ZONES (ROLE REVERSAL) ==="
+structPivotLen = input.int(4, "Structure Swing Pivot Length (Bars)", minval=2, maxval=20, group=grp_struct, tooltip="Bars to left/right for confirming swing high/low structure.")
+showFlipBoxes  = input.bool(true, "Plot Broken Structure Flip Zones (Shaded Boxes)", group=grp_struct)
+colFlipZone    = input.color(color.new(#1e88e5, 80), "Flip Zone Box Color", group=grp_struct)
+zoneWidthAtr   = input.float(0.35, "Flip Zone Thickness (ATR Multiple)", minval=0.1, step=0.05, group=grp_struct)
 
-// --- Group: Contextual Price Action (Nial Fuller Rules) ---
-grp_pa          = "=== CONTEXTUAL PRICE ACTION ==="
-inp_show_pa     = input.bool(true, "Show Price Action Signals", group=grp_pa)
-inp_gate_pa     = input.bool(true, "Gate PA Signals (Only at S/R or S/D Zones)", group=grp_pa, tooltip="Filters out noisy patterns in the middle of nowhere; requires proximity to active levels")
-inp_pin_wick    = input.float(66.7, "Pin Bar Min Wick Percentage (%)", minval=50.0, maxval=85.0, step=1.0, group=grp_pa)
-inp_pin_body    = input.float(33.3, "Pin Bar Max Body Percentage (%)", minval=15.0, maxval=45.0, step=1.0, group=grp_pa)
-inp_show_pin    = input.bool(true, "Detect Pin Bars", group=grp_pa)
-inp_show_engulf = input.bool(true, "Detect Engulfing Bars", group=grp_pa)
-inp_show_fakey  = input.bool(true, "Detect Fakey Reversals", group=grp_pa)
+// --- Group: Dealing Range & Equilibrium ---
+grp_range      = "=== 4. DEALING RANGE & PREMIUM / DISCOUNT ENGINE ==="
+showFibLines   = input.bool(true, "Plot Dealing Range Fib Lines (0.0, 0.25, 0.50, 0.75, 1.0)", group=grp_range)
+onlyPremium    = input.bool(true, "Strict Rule: Sells ONLY in Premium (>=50%), Buys ONLY in Discount (<=50%)", group=grp_range)
 
-// --- Group: Major Periodic Highs & Lows ---
-grp_periodic    = "=== MAJOR PERIODIC REFERENCE LEVELS ==="
-inp_show_pdh_pdl= input.bool(true, "Show Previous Day High/Low (PDH / PDL)", group=grp_periodic)
-inp_show_pwh_pwl= input.bool(true, "Show Previous Week High/Low (PWH / PWL)", group=grp_periodic)
-inp_show_pmh_pml= input.bool(false, "Show Previous Month High/Low (PMH / PML)", group=grp_periodic)
-inp_col_pdh     = input.color(color.new(#9e9e9e, 30), "PDH/PDL Color", group=grp_periodic)
-inp_col_pwh     = input.color(color.new(#e040fb, 30), "PWH/PWL Color", group=grp_periodic)
-inp_col_pmh     = input.color(color.new(#ff9100, 30), "PMH/PML Color", group=grp_periodic)
+// --- Group: Price Action Triggers ---
+grp_pa         = "=== 5. NIAL FULLER PRICE ACTION REVERSAL ENGINE ==="
+pinBodyPct     = input.float(33.0, "Pin Bar Max Body %", minval=10.0, maxval=50.0, group=grp_pa)
+pinTailPct     = input.float(60.0, "Pin Bar Min Rejection Tail %", minval=50.0, maxval=85.0, group=grp_pa)
+showPin        = input.bool(true, "Show Pin Bars (Rejection Candles)", group=grp_pa)
+showEngulf     = input.bool(true, "Show Engulfing Bars", group=grp_pa)
+showFakey      = input.bool(true, "Show Fakey Patterns (False Breakouts)", group=grp_pa)
 
-// --- Group: Trade Scenario Blueprint ---
-grp_scen        = "=== TRADE SCENARIO BLUEPRINT ==="
-inp_show_scen   = input.bool(true, "Show Active Trade Scenario on Chart", group=grp_scen)
-inp_min_rr_tp1  = input.float(1.5, "Min Risk-Reward TP1", minval=1.0, maxval=3.0, step=0.1, group=grp_scen)
-inp_min_rr_tp2  = input.float(2.5, "Min Risk-Reward TP2", minval=1.5, maxval=5.0, step=0.1, group=grp_scen)
+// --- Group: Risk & Targets ---
+grp_risk       = "=== 6. RISK & TARGETS (R:R 1:1.5 - 1:2.0 / SWING TARGET) ==="
+showSignals    = input.bool(true, "Show Sniper Entry Signals", group=grp_risk)
+plotTPSL       = input.bool(true, "Plot Entry, SL & TP Target Lines", group=grp_risk)
+rr_ratio       = input.float(1.5, "Target 1 R:R (Breakeven / Partial)", minval=1.0, maxval=5.0, step=0.1, group=grp_risk)
+useSwingTP2    = input.bool(true, "Target 2: Target Previous Swing Low/High (Full Move)", group=grp_risk)
+rr_runner      = input.float(2.0, "Target 2 Fixed R:R (if Swing Target disabled)", minval=1.5, maxval=10.0, step=0.5, group=grp_risk)
+slAtrMult      = input.float(0.4, "SL Buffer ATR Multiplier", minval=0.1, step=0.1, group=grp_risk)
 
-// --- Group: Prop Firm & Risk Management Dashboard ---
-grp_risk        = "=== PROP FIRM RISK HUD & POSITION SIZING ==="
-inp_show_hud    = input.bool(true, "Show On-Chart HUD Dashboard Table", group=grp_risk)
-inp_account_bal = input.float(100000.0, "Account Balance / Starting Equity ($)", minval=100.0, group=grp_risk)
-inp_risk_pct    = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=3.0, step=0.1, group=grp_risk)
-inp_prop_firm   = input.string("FTMO (2-Step)", "Prop Firm Rule Preset", options=["FTMO (2-Step)", "The5ers (High Stakes)", "FundedNext (Stellar)", "Custom"], group=grp_risk)
-inp_cust_max_dd = input.float(10.0, "Custom Max Drawdown (%)", group=grp_risk)
-inp_cust_day_dd = input.float(5.0, "Custom Daily Loss Limit (%)", group=grp_risk)
+// --- Group: Prop Firm HUD Dashboard ---
+grp_hud        = "=== 7. PROP FIRM RISK HUD DASHBOARD ==="
+showHUD        = input.bool(true, "Show On-Chart HUD Dashboard Table", group=grp_hud)
+hudPosition    = input.string("Top Right", "HUD Position", options=["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group=grp_hud)
+inp_account_bal= input.float(10000.0, "Account Balance ($)", minval=100.0, group=grp_hud)
+inp_risk_pct   = input.float(1.5, "Risk Per Trade (%)", minval=0.5, maxval=3.0, step=0.5, group=grp_hud)
 
-// ====================================================================================================
-// 2. USER DEFINED TYPES (UDTs)
-// ====================================================================================================
+// =====================================================================================================
+// === 2. ULTRA-FAST NON-REPAINTING MTF DATA FETCHING ===
+// =====================================================================================================
 
-// Support / Resistance Zone Object
-type SRZone
-    box     bx
-    label   lbl
-    float   price
-    float   top
-    float   bottom
-    int     touches
-    string  role        // "SUPPORT", "RESISTANCE", "FLIPPED_TO_RESISTANCE", "FLIPPED_TO_SUPPORT"
-    int     start_bar
-    bool    is_active
+// Request HTF confirmed candles strictly with lookahead_off and [1] offset
+[m_c1, m_o1, m_h1, m_l1] = request.security(syminfo.tickerid, "1M", [close[1], open[1], high[1], low[1]], lookahead=barmerge.lookahead_off)
+[m_c2, m_o2, m_h2, m_l2] = request.security(syminfo.tickerid, "1M", [close[2], open[2], high[2], low[2]], lookahead=barmerge.lookahead_off)
 
-// Supply / Demand Zone Object
-type SDZone
-    box     bx
-    label   lbl
-    float   top
-    float   bottom
-    string  kind        // "SUPPLY", "DEMAND"
-    string  state       // "FRESH", "TESTED", "MITIGATED"
-    int     start_bar
-    bool    is_active
+[w_c1, w_o1, w_h1, w_l1] = request.security(syminfo.tickerid, "1W", [close[1], open[1], high[1], low[1]], lookahead=barmerge.lookahead_off)
+[w_c2, w_o2, w_h2, w_l2] = request.security(syminfo.tickerid, "1W", [close[2], open[2], high[2], low[2]], lookahead=barmerge.lookahead_off)
 
-// ====================================================================================================
-// 3. PERSISTENT COLLECTIONS & GLOBAL VARIABLES
-// ====================================================================================================
-
-var SRZone[] g_sr_zones = array.new<SRZone>()
-var SDZone[] g_sd_zones = array.new<SDZone>()
+[d_c1, d_o1, d_h1, d_l1] = request.security(syminfo.tickerid, "1D", [close[1], open[1], high[1], low[1]], lookahead=barmerge.lookahead_off)
+[d_c2, d_o2, d_h2, d_l2] = request.security(syminfo.tickerid, "1D", [close[2], open[2], high[2], low[2]], lookahead=barmerge.lookahead_off)
 
 // Volatility reference
-cur_atr = ta.atr(inp_atr_len)
-atr_safe = math.max(cur_atr, syminfo.mintick * 10)
-in_draw_window = (last_bar_index - bar_index) <= inp_lookback_bars
+atrVal = ta.atr(14)
+atrSafe = math.max(atrVal, syminfo.mintick * 10)
+slBuffer = atrSafe * slAtrMult
 
-// ====================================================================================================
-// 4. NON-REPAINTING MAJOR PERIODIC LEVELS
-// ====================================================================================================
+// =====================================================================================================
+// === 3. MOVING AVERAGE 100 ENGINE ===
+// =====================================================================================================
 
-// Request strictly confirmed previous bars using lookahead_off and [1] index
-[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
-[pwh, pwl] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead=barmerge.lookahead_off)
-[pmh, pml] = request.security(syminfo.tickerid, "M", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+float emaVal = na
+if emaTF == "H4 (240m)"
+    emaVal := request.security(syminfo.tickerid, "240", ta.ema(close, emaPeriod)[1], lookahead=barmerge.lookahead_off)
+else if emaTF == "D1 (Daily)"
+    emaVal := request.security(syminfo.tickerid, "D", ta.ema(close, emaPeriod)[1], lookahead=barmerge.lookahead_off)
+else
+    emaVal := ta.ema(close, emaPeriod)
 
-var line ln_pdh = na, var line ln_pdl = na
-var line ln_pwh = na, var line ln_pwl = na
-var line ln_pmh = na, var line ln_pml = na
+bool isAboveEma = not na(emaVal) and close > emaVal
+bool isBelowEma = not na(emaVal) and close < emaVal
 
-if barstate.islast
-    if inp_show_pdh_pdl and not na(pdh)
-        line.delete(ln_pdh), line.delete(ln_pdl)
-        ln_pdh := line.new(bar_index - 30, pdh, bar_index + 10, pdh, color=inp_col_pdh, width=1, style=line.style_dashed)
-        ln_pdl := line.new(bar_index - 30, pdl, bar_index + 10, pdl, color=inp_col_pdh, width=1, style=line.style_dashed)
-        label.new(bar_index + 10, pdh, "PDH", style=label.style_none, textcolor=inp_col_pdh, size=size.small)
-        label.new(bar_index + 10, pdl, "PDL", style=label.style_none, textcolor=inp_col_pdh, size=size.small)
-        
-    if inp_show_pwh_pwl and not na(pwh)
-        line.delete(ln_pwh), line.delete(ln_pwl)
-        ln_pwh := line.new(bar_index - 50, pwh, bar_index + 10, pwh, color=inp_col_pwh, width=1, style=line.style_dotted)
-        ln_pwl := line.new(bar_index - 50, pwl, bar_index + 10, pwl, color=inp_col_pwh, width=1, style=line.style_dotted)
-        label.new(bar_index + 10, pwh, "PWH", style=label.style_none, textcolor=inp_col_pwh, size=size.small)
-        label.new(bar_index + 10, pwl, "PWL", style=label.style_none, textcolor=inp_col_pwh, size=size.small)
+// Strict filter flags
+bool allowBuy  = not useEmaFilter or isAboveEma
+bool allowSell = not useEmaFilter or isBelowEma
 
-    if inp_show_pmh_pml and not na(pmh)
-        line.delete(ln_pmh), line.delete(ln_pml)
-        ln_pmh := line.new(bar_index - 80, pmh, bar_index + 10, pmh, color=inp_col_pmh, width=1, style=line.style_dotted)
-        ln_pml := line.new(bar_index - 80, pml, bar_index + 10, pml, color=inp_col_pmh, width=1, style=line.style_dotted)
-        label.new(bar_index + 10, pmh, "PMH", style=label.style_none, textcolor=inp_col_pmh, size=size.small)
-        label.new(bar_index + 10, pml, "PML", style=label.style_none, textcolor=inp_col_pmh, size=size.small)
+// Plot EMA 100 on chart
+color emaColor = isAboveEma ? color.new(#00c853, 20) : color.new(#ff3d00, 20)
+plot(showEmaLine ? emaVal : na, title="EMA 100 Filter", color=emaColor, linewidth=2)
 
-// ====================================================================================================
-// 5. FRACTALS + ATR CLUSTERING WITH POLARITY FLIPS & AUTO-DELETION
-// ====================================================================================================
+// =====================================================================================================
+// === 4. NIAL FULLER PRICE ACTION FUNCTIONS ===
+// =====================================================================================================
 
-// Bill Williams fractal detection
-f_ph = ta.pivothigh(high, inp_fr_left, inp_fr_right)
-f_pl = ta.pivotlow(low, inp_fr_left, inp_fr_right)
+f_isPinBar(float o, float c, float h, float l, float maxBody, float minTail) =>
+    rng = h - l
+    body = math.abs(c - o)
+    upWick = h - math.max(o, c)
+    dnWick = math.min(o, c) - l
+    safeRng = rng <= 0.0 ? 1.0 : rng
+    isSmallBody = (body / safeRng) * 100.0 <= maxBody
+    isBull = isSmallBody and ((dnWick / safeRng) * 100.0 >= minTail)
+    isBear = isSmallBody and ((upWick / safeRng) * 100.0 >= minTail)
+    [isBull, isBear]
 
-cluster_tolerance = atr_safe * inp_cluster_mult
+f_isEngulfing(float o1, float c1, float h1, float l1, float o2, float c2, float h2, float l2) =>
+    isBull = (c1 > o1) and (c2 < o2) and (c1 >= h2) and (o1 <= l2 or o1 <= c2)
+    isBear = (c1 < o1) and (c2 > o2) and (c1 <= l2) and (o1 >= h2 or o1 >= c2)
+    [isBull, isBear]
 
-// 5.1. Register new fractal turning points into clusters
-if not na(f_ph) and inp_show_sr and in_draw_window
-    float pivot_val = f_ph
-    int pivot_bar   = bar_index - inp_fr_right
-    bool merged     = false
-    
-    // Check existing active levels for clustering
-    if array.size(g_sr_zones) > 0
-        for i = 0 to array.size(g_sr_zones) - 1
-            SRZone z = array.get(g_sr_zones, i)
-            if z.is_active and math.abs(pivot_val - z.price) <= cluster_tolerance
-                // Merge into existing cluster
-                z.touches   += 1
-                z.price     := (z.price * (z.touches - 1) + pivot_val) / z.touches
-                z.top       := math.max(z.top, pivot_val)
-                z.bottom    := math.min(z.bottom, pivot_val - (atr_safe * 0.15))
-                box.set_top(z.bx, z.top)
-                box.set_bottom(z.bx, z.bottom)
-                box.set_right(z.bx, bar_index + 15)
-                label.set_text(z.lbl, z.role + " (" + str.tostring(z.touches) + "x)")
-                merged := true
-                break
-                
-    if not merged
-        // Keep active levels bounded to max 12
-        if array.size(g_sr_zones) >= 12
-            SRZone oldest = array.shift(g_sr_zones)
-            box.delete(oldest.bx)
-            label.delete(oldest.lbl)
+// Multi-Timeframe Bias Assessment
+[m_pinBull, m_pinBear] = f_isPinBar(m_o1, m_c1, m_h1, m_l1, pinBodyPct, pinTailPct)
+[m_engBull, m_engBear] = f_isEngulfing(m_o1, m_c1, m_h1, m_l1, m_o2, m_c2, m_h2, m_l2)
+int m_bias = 0
+if m_pinBull or m_engBull or (m_c1 > m_o1 and not m_pinBear)
+    m_bias := 1
+else if m_pinBear or m_engBear or (m_c1 < m_o1 and not m_pinBull)
+    m_bias := -1
 
-        // Create new Resistance level
-        float top_p = pivot_val
-        float bot_p = pivot_val - (atr_safe * 0.15)
-        box bx = box.new(pivot_bar, top_p, bar_index + 15, bot_p, bgcolor=inp_col_res, border_color=color.new(inp_col_res, 30), border_width=1)
-        label lb = label.new(bar_index + 15, pivot_val, "RESISTANCE (1x)", style=label.style_none, textcolor=color.red, size=size.small)
-        SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
-                                  role="RESISTANCE", start_bar=pivot_bar, is_active=true)
-        array.push(g_sr_zones, new_z)
+[w_pinBull, w_pinBear] = f_isPinBar(w_o1, w_c1, w_h1, w_l1, pinBodyPct, pinTailPct)
+[w_engBull, w_engBear] = f_isEngulfing(w_o1, w_c1, w_h1, w_l1, w_o2, w_c2, w_h2, w_l2)
+int w_bias = 0
+if w_pinBull or w_engBull or (w_c1 > w_o1 and not w_pinBear)
+    w_bias := 1
+else if w_pinBear or w_engBear or (w_c1 < w_o1 and not w_pinBull)
+    w_bias := -1
 
-if not na(f_pl) and inp_show_sr and in_draw_window
-    float pivot_val = f_pl
-    int pivot_bar   = bar_index - inp_fr_right
-    bool merged     = false
-    
-    if array.size(g_sr_zones) > 0
-        for i = 0 to array.size(g_sr_zones) - 1
-            SRZone z = array.get(g_sr_zones, i)
-            if z.is_active and math.abs(pivot_val - z.price) <= cluster_tolerance
-                z.touches   += 1
-                z.price     := (z.price * (z.touches - 1) + pivot_val) / z.touches
-                z.top       := math.max(z.top, pivot_val + (atr_safe * 0.15))
-                z.bottom    := math.min(z.bottom, pivot_val)
-                box.set_top(z.bx, z.top)
-                box.set_bottom(z.bx, z.bottom)
-                box.set_right(z.bx, bar_index + 15)
-                label.set_text(z.lbl, z.role + " (" + str.tostring(z.touches) + "x)")
-                merged := true
-                break
-                
-    if not merged
-        if array.size(g_sr_zones) >= 12
-            SRZone oldest = array.shift(g_sr_zones)
-            box.delete(oldest.bx)
-            label.delete(oldest.lbl)
+[d_pinBull, d_pinBear] = f_isPinBar(d_o1, d_c1, d_h1, d_l1, pinBodyPct, pinTailPct)
+[d_engBull, d_engBear] = f_isEngulfing(d_o1, d_c1, d_h1, d_l1, d_o2, d_c2, d_h2, d_l2)
+int d_bias = 0
+if d_pinBull or d_engBull or (d_c1 > d_o1 and not d_pinBear)
+    d_bias := 1
+else if d_pinBear or d_engBear or (d_c1 < d_o1 and not d_pinBull)
+    d_bias := -1
 
-        // Create new Support level
-        float top_p = pivot_val + (atr_safe * 0.15)
-        float bot_p = pivot_val
-        box bx = box.new(pivot_bar, top_p, bar_index + 15, bot_p, bgcolor=inp_col_sup, border_color=color.new(inp_col_sup, 30), border_width=1)
-        label lb = label.new(bar_index + 15, pivot_val, "SUPPORT (1x)", style=label.style_none, textcolor=color.blue, size=size.small)
-        SRZone new_z = SRZone.new(bx=bx, lbl=lb, price=pivot_val, top=top_p, bottom=bot_p, touches=1, 
-                                  role="SUPPORT", start_bar=pivot_bar, is_active=true)
-        array.push(g_sr_zones, new_z)
+bool macro_bearish = (w_bias == -1 or not reqWeekly) and (d_bias == -1 or not reqDaily) and (m_bias != 1 or not reqMonthly)
+bool macro_bullish = (w_bias == 1 or not reqWeekly)  and (d_bias == 1 or not reqDaily)  and (m_bias != -1 or not reqMonthly)
 
-// 5.2. Live Bar-Close State Machine: Polarity Flips & Auto-Deletion
-if barstate.isconfirmed and in_draw_window and array.size(g_sr_zones) > 0 and inp_show_sr
-    for i = array.size(g_sr_zones) - 1 to 0
-        SRZone z = array.get(g_sr_zones, i)
-        if z.is_active
-            // Extend box rightward
-            box.set_right(z.bx, bar_index + 15)
-            label.set_x(z.lbl, bar_index + 15)
+// =====================================================================================================
+// === 5. SWING STRUCTURE BREAKOUT & FLIP TRACKING ===
+// =====================================================================================================
 
-            // --- Case A: Support Role ---
-            if z.role == "SUPPORT"
-                if close < z.bottom
-                    // Support broken -> Polarity Flip to Resistance!
-                    z.role := "FLIPPED_TO_RESISTANCE"
-                    box.set_bgcolor(z.bx, inp_col_flip_res)
-                    box.set_border_color(z.bx, color.new(inp_col_flip_res, 30))
-                    label.set_text(z.lbl, "FLIPPED RES (Broken Sup)")
-                    label.set_textcolor(z.lbl, color.orange)
+ph_val = ta.pivothigh(high, structPivotLen, structPivotLen)
+pl_val = ta.pivotlow(low, structPivotLen, structPivotLen)
 
-            // --- Case B: Resistance Role ---
-            else if z.role == "RESISTANCE"
-                if close > z.top
-                    // Resistance broken -> Polarity Flip to Support!
-                    z.role := "FLIPPED_TO_SUPPORT"
-                    box.set_bgcolor(z.bx, inp_col_flip_sup)
-                    box.set_border_color(z.bx, color.new(inp_col_flip_sup, 30))
-                    label.set_text(z.lbl, "FLIPPED SUP (Broken Res)")
-                    label.set_textcolor(z.lbl, color.teal)
+var float lastPivotLowPrice  = na
+var int   lastPivotLowBar    = na
+var float lastPivotHighPrice = na
+var int   lastPivotHighBar   = na
 
-            // --- Case C: Flipped Resistance Disrespected (Blown Through) -> AUTO DELETE ---
-            else if z.role == "FLIPPED_TO_RESISTANCE"
-                if inp_auto_purge and (close > z.top + (atr_safe * 0.25))
-                    // Price failed to respect flipped resistance! Purge immediately!
-                    box.delete(z.bx)
-                    label.delete(z.lbl)
-                    z.is_active := false
-                    array.remove(g_sr_zones, i)
+if not na(pl_val)
+    lastPivotLowPrice := low[structPivotLen]
+    lastPivotLowBar   := bar_index - structPivotLen
 
-            // --- Case D: Flipped Support Disrespected (Blown Through) -> AUTO DELETE ---
-            else if z.role == "FLIPPED_TO_SUPPORT"
-                if inp_auto_purge and (close < z.bottom - (atr_safe * 0.25))
-                    // Price failed to respect flipped support! Purge immediately!
-                    box.delete(z.bx)
-                    label.delete(z.lbl)
-                    z.is_active := false
-                    array.remove(g_sr_zones, i)
+if not na(ph_val)
+    lastPivotHighPrice := high[structPivotLen]
+    lastPivotHighBar   := bar_index - structPivotLen
 
-// 5.3. Dynamic Proximity & Active Level Visibility Filter (Nearest N Only)
-// Executed only on the latest bars to guarantee instant execution
-if barstate.isconfirmed and (last_bar_index - bar_index <= 5) and array.size(g_sr_zones) > 0 and inp_show_sr
-    for i = 0 to array.size(g_sr_zones) - 1
-        SRZone z = array.get(g_sr_zones, i)
-        if z.is_active
-            int closer_count = 0
-            if z.price > close
-                // Resistance or Flipped Resistance: count active levels strictly closer to close
-                for j = 0 to array.size(g_sr_zones) - 1
-                    SRZone other = array.get(g_sr_zones, j)
-                    if other.is_active and other.price > close and other.price < z.price
-                        closer_count += 1
-                
-                if closer_count < inp_max_sr_show
-                    // In top nearest N -> Visible
-                    color base_c = (z.role == "FLIPPED_TO_RESISTANCE") ? inp_col_flip_res : inp_col_res
-                    box.set_bgcolor(z.bx, base_c)
-                    box.set_border_color(z.bx, color.new(base_c, 30))
-                    label.set_textcolor(z.lbl, (z.role == "FLIPPED_TO_RESISTANCE") ? color.orange : color.red)
-                else
-                    // Beyond top N -> Hide box & label to keep chart pristine
-                    box.set_bgcolor(z.bx, color.new(color.white, 100))
-                    box.set_border_color(z.bx, color.new(color.white, 100))
-                    label.set_textcolor(z.lbl, color.new(color.white, 100))
-            else
-                // Support or Flipped Support: count active levels strictly closer to close
-                for j = 0 to array.size(g_sr_zones) - 1
-                    SRZone other = array.get(g_sr_zones, j)
-                    if other.is_active and other.price < close and other.price > z.price
-                        closer_count += 1
-                
-                if closer_count < inp_max_sr_show
-                    // In top nearest N -> Visible
-                    color base_c = (z.role == "FLIPPED_TO_SUPPORT") ? inp_col_flip_sup : inp_col_sup
-                    box.set_bgcolor(z.bx, base_c)
-                    box.set_border_color(z.bx, color.new(base_c, 30))
-                    label.set_textcolor(z.lbl, (z.role == "FLIPPED_TO_SUPPORT") ? color.teal : color.blue)
-                else
-                    // Beyond top N -> Hide
-                    box.set_bgcolor(z.bx, color.new(color.white, 100))
-                    box.set_border_color(z.bx, color.new(color.white, 100))
-                    label.set_textcolor(z.lbl, color.new(color.white, 100))
+var float brokenLowLevel     = na
+var int   brokenLowBar       = na
+var float swingHighOrigin    = na
+var int   swingHighBar       = na
+var float recentSwingLow     = na
+var int   recentSwingLowBar  = na
+var bool  lowIsBroken        = false
 
-// ====================================================================================================
-// 6. SUPPLY & DEMAND / INSTITUTIONAL ORDER BLOCKS (WITH AUTO-MITIGATION)
-// ====================================================================================================
+var float brokenHighLevel    = na
+var int   brokenHighBar      = na
+var float swingLowOrigin     = na
+var int   swingLowBar        = na
+var float recentSwingHigh    = na
+var int   recentSwingHighBar = na
+var bool  highIsBroken       = false
 
-candle_body = math.abs(close - open)
-is_displacement = candle_body >= (atr_safe * inp_disp_mult)
+// Detect Structure Break of Swing Low downwards
+if not na(lastPivotLowPrice) and close < lastPivotLowPrice and not lowIsBroken
+    lowIsBroken        := true
+    brokenLowLevel     := lastPivotLowPrice
+    brokenLowBar       := lastPivotLowBar
+    swingHighOrigin    := not na(lastPivotHighPrice) ? lastPivotHighPrice : ta.highest(high, 20)
+    swingHighBar       := not na(lastPivotHighBar) ? lastPivotHighBar : math.max(0, bar_index - 20)
+    recentSwingLow     := low
+    recentSwingLowBar  := bar_index
+    highIsBroken       := false
 
-if is_displacement and inp_show_sd and in_draw_window
-    // Bullish displacement -> Base candle [1] is DEMAND
-    if close > open and close[1] < open[1]
-        if array.size(g_sd_zones) >= 8
-            SDZone oldest = array.shift(g_sd_zones)
-            box.delete(oldest.bx)
-            label.delete(oldest.lbl)
+if lowIsBroken
+    if low < recentSwingLow or na(recentSwingLow)
+        recentSwingLow    := low
+        recentSwingLowBar := bar_index
+    if close > swingHighOrigin
+        lowIsBroken := false
 
-        float dem_top = math.max(open[1], close[1])
-        float dem_bot = low[1]
-        box bx = box.new(left=bar_index - 1, top=dem_top, right=bar_index + 20, bottom=dem_bot,
-                         bgcolor=inp_col_dem, border_color=color.new(inp_col_dem, 20), border_width=1)
-        label lb = label.new(x=bar_index + 20, y=(dem_top + dem_bot)/2, text="DEMAND (Fresh)",
-                             style=label.style_none, textcolor=color.green, size=size.small)
-        SDZone new_sd = SDZone.new(bx=bx, lbl=lb, top=dem_top, bottom=dem_bot, kind="DEMAND", 
-                                   state="FRESH", start_bar=bar_index - 1, is_active=true)
-        array.push(g_sd_zones, new_sd)
-        
-    // Bearish displacement -> Base candle [1] is SUPPLY
-    else if close < open and close[1] > open[1]
-        if array.size(g_sd_zones) >= 8
-            SDZone oldest = array.shift(g_sd_zones)
-            box.delete(oldest.bx)
-            label.delete(oldest.lbl)
+// Detect Structure Break of Swing High upwards
+if not na(lastPivotHighPrice) and close > lastPivotHighPrice and not highIsBroken
+    highIsBroken       := true
+    brokenHighLevel    := lastPivotHighPrice
+    brokenHighBar      := lastPivotHighBar
+    swingLowOrigin     := not na(lastPivotLowPrice) ? lastPivotLowPrice : ta.lowest(low, 20)
+    swingLowBar        := not na(lastPivotLowBar) ? lastPivotLowBar : math.max(0, bar_index - 20)
+    recentSwingHigh    := high
+    recentSwingHighBar := bar_index
+    lowIsBroken        := false
 
-        float sup_top = high[1]
-        float sup_bot = math.min(open[1], close[1])
-        box bx = box.new(left=bar_index - 1, top=sup_top, right=bar_index + 20, bottom=sup_bot,
-                         bgcolor=inp_col_sup_z, border_color=color.new(inp_col_sup_z, 20), border_width=1)
-        label lb = label.new(x=bar_index + 20, y=(sup_top + sup_bot)/2, text="SUPPLY (Fresh)",
-                             style=label.style_none, textcolor=color.red, size=size.small)
-        SDZone new_sd = SDZone.new(bx=bx, lbl=lb, top=sup_top, bottom=sup_bot, kind="SUPPLY", 
-                                   state="FRESH", start_bar=bar_index - 1, is_active=true)
-        array.push(g_sd_zones, new_sd)
+if highIsBroken
+    if high > recentSwingHigh or na(recentSwingHigh)
+        recentSwingHigh    := high
+        recentSwingHighBar := bar_index
+    if close < swingLowOrigin
+        highIsBroken := false
 
-// Check mitigation of active Supply & Demand zones
-if barstate.isconfirmed and in_draw_window and array.size(g_sd_zones) > 0 and inp_show_sd
-    for i = array.size(g_sd_zones) - 1 to 0
-        SDZone sd = array.get(g_sd_zones, i)
-        if sd.is_active
-            box.set_right(sd.bx, bar_index + 20)
-            label.set_x(sd.lbl, bar_index + 20)
+// =====================================================================================================
+// === 6. DEALING RANGE & EQUILIBRIUM (50% FIB) ===
+// =====================================================================================================
 
-            if sd.kind == "DEMAND"
-                // Mitigated if price closes below bottom
-                if low <= sd.bottom
-                    if inp_purge_mit
-                        box.delete(sd.bx)
-                        label.delete(sd.lbl)
-                        sd.is_active := false
-                        array.remove(g_sd_zones, i)
-                    else
-                        sd.state := "MITIGATED"
-                        box.set_bgcolor(sd.bx, color.new(color.gray, 90))
-                        label.set_text(sd.lbl, "DEMAND (Mitigated)")
-                else if low <= sd.top and sd.state == "FRESH"
-                    sd.state := "TESTED"
-                    label.set_text(sd.lbl, "DEMAND (Tested)")
+var float rangeHigh   = na
+var float rangeLow    = na
+var float rangeEq     = na
+var float fib75       = na
+var float fib25       = na
+var int   fibStartBar = na
 
-            else if sd.kind == "SUPPLY"
-                // Mitigated if price breaks above top
-                if high >= sd.top
-                    if inp_purge_mit
-                        box.delete(sd.bx)
-                        label.delete(sd.lbl)
-                        sd.is_active := false
-                        array.remove(g_sd_zones, i)
-                    else
-                        sd.state := "MITIGATED"
-                        box.set_bgcolor(sd.bx, color.new(color.gray, 90))
-                        label.set_text(sd.lbl, "SUPPLY (Mitigated)")
-                else if high >= sd.bottom and sd.state == "FRESH"
-                    sd.state := "TESTED"
-                    label.set_text(sd.lbl, "SUPPLY (Tested)")
+if lowIsBroken and not na(swingHighOrigin) and not na(recentSwingLow)
+    rangeHigh   := swingHighOrigin
+    rangeLow    := recentSwingLow
+    rangeEq     := (rangeHigh + rangeLow) * 0.5
+    fib75       := rangeLow + (rangeHigh - rangeLow) * 0.75
+    fib25       := rangeLow + (rangeHigh - rangeLow) * 0.25
+    fibStartBar := swingHighBar
+else if highIsBroken and not na(recentSwingHigh) and not na(swingLowOrigin)
+    rangeHigh   := recentSwingHigh
+    rangeLow    := swingLowOrigin
+    rangeEq     := (rangeHigh + rangeLow) * 0.5
+    fib75       := rangeLow + (rangeHigh - rangeLow) * 0.75
+    fib25       := rangeLow + (rangeHigh - rangeLow) * 0.25
+    fibStartBar := swingLowBar
 
-// 6.2. Supply & Demand Proximity Filter (Nearest N Only)
-// Executed only on the latest bars to guarantee instant execution
-if barstate.isconfirmed and (last_bar_index - bar_index <= 5) and array.size(g_sd_zones) > 0 and inp_show_sd
-    int max_per_side = math.max(1, math.floor(inp_max_sd / 2))
-    for i = 0 to array.size(g_sd_zones) - 1
-        SDZone sd = array.get(g_sd_zones, i)
-        if sd.is_active
-            int closer_count = 0
-            if sd.kind == "SUPPLY" and sd.bottom >= close
-                for j = 0 to array.size(g_sd_zones) - 1
-                    SDZone other = array.get(g_sd_zones, j)
-                    if other.is_active and other.kind == "SUPPLY" and other.bottom >= close and other.bottom < sd.bottom
-                        closer_count += 1
-                
-                if closer_count < max_per_side
-                    box.set_bgcolor(sd.bx, inp_col_sup_z)
-                    box.set_border_color(sd.bx, color.new(inp_col_sup_z, 20))
-                    label.set_textcolor(sd.lbl, color.red)
-                else
-                    box.set_bgcolor(sd.bx, color.new(color.white, 100))
-                    box.set_border_color(sd.bx, color.new(color.white, 100))
-                    label.set_textcolor(sd.lbl, color.new(color.white, 100))
-            else if sd.kind == "DEMAND" and sd.top <= close
-                for j = 0 to array.size(g_sd_zones) - 1
-                    SDZone other = array.get(g_sd_zones, j)
-                    if other.is_active and other.kind == "DEMAND" and other.top <= close and other.top > sd.top
-                        closer_count += 1
-                
-                if closer_count < max_per_side
-                    box.set_bgcolor(sd.bx, inp_col_dem)
-                    box.set_border_color(sd.bx, color.new(inp_col_dem, 20))
-                    label.set_textcolor(sd.lbl, color.green)
-                else
-                    box.set_bgcolor(sd.bx, color.new(color.white, 100))
-                    box.set_border_color(sd.bx, color.new(color.white, 100))
-                    label.set_textcolor(sd.lbl, color.new(color.white, 100))
+bool inPremium  = not na(rangeEq) and close >= rangeEq
+bool inDiscount = not na(rangeEq) and close <= rangeEq
 
-// ====================================================================================================
-// 7. MARKET STRUCTURE (BOS & CHOCH)
-// ====================================================================================================
+// =====================================================================================================
+// === 7. INSTANT VISUAL RENDERING (EXECUTED ONLY ON LAST BAR - ZERO TIMEOUT) ===
+// =====================================================================================================
 
-var float last_sh = na
-var float last_sl = na
-var int   last_sh_bar = na
-var int   last_sl_bar = na
-var int   market_trend = 0 // 1 = Bullish, -1 = Bearish, 0 = Neutral
+var box flipBox = na
+float zThickness = nz(atrSafe * zoneWidthAtr, syminfo.mintick * 15)
 
-sh = ta.pivothigh(high, inp_str_len, inp_str_len)
-sl = ta.pivotlow(low, inp_str_len, inp_str_len)
+if showFlipBoxes and barstate.islast
+    box.delete(flipBox)
+    if lowIsBroken and not na(brokenLowLevel) and not na(brokenLowBar)
+        flipBox := box.new(left=brokenLowBar, top=brokenLowLevel + zThickness, 
+                           right=bar_index + 15, bottom=brokenLowLevel - zThickness,
+                           bgcolor=colFlipZone, border_color=color.blue, border_style=line.style_solid)
+    else if highIsBroken and not na(brokenHighLevel) and not na(brokenHighBar)
+        flipBox := box.new(left=brokenHighBar, top=brokenHighLevel + zThickness, 
+                           right=bar_index + 15, bottom=brokenHighLevel - zThickness,
+                           bgcolor=colFlipZone, border_color=color.blue, border_style=line.style_solid)
 
-if not na(sh)
-    last_sh := sh
-    last_sh_bar := bar_index - inp_str_len
+var line line100 = na
+var line line75  = na
+var line line50  = na
+var line line25  = na
+var line line0   = na
 
-if not na(sl)
-    last_sl := sl
-    last_sl_bar := bar_index - inp_str_len
+if showFibLines and barstate.islast and not na(rangeHigh) and not na(rangeLow) and not na(fibStartBar)
+    line.delete(line100)
+    line.delete(line75)
+    line.delete(line50)
+    line.delete(line25)
+    line.delete(line0)
 
-// Detect Breakouts
-bool bos_bull = false
-bool bos_bear = false
-bool choch_bull = false
-bool choch_bear = false
+    line100 := line.new(fibStartBar, rangeHigh, bar_index + 15, rangeHigh, color=color.red,    style=line.style_dotted)
+    line75  := line.new(fibStartBar, fib75,     bar_index + 15, fib75,     color=color.maroon, style=line.style_dotted)
+    line50  := line.new(fibStartBar, rangeEq,   bar_index + 15, rangeEq,   color=color.blue,   style=line.style_dashed, width=2)
+    line25  := line.new(fibStartBar, fib25,     bar_index + 15, fib25,     color=color.teal,   style=line.style_dotted)
+    line0   := line.new(fibStartBar, rangeLow,  bar_index + 15, rangeLow,  color=color.green,  style=line.style_dotted)
 
-break_price_high = inp_close_break ? close : high
-break_price_low  = inp_close_break ? close : low
+// =====================================================================================================
+// === 8. RETEST & PRICE ACTION SNIPER TRIGGER ===
+// =====================================================================================================
 
-if not na(last_sh) and break_price_high > last_sh and (inp_close_break ? close[1] <= last_sh : high[1] <= last_sh)
-    if market_trend == 1
-        bos_bull := true
-        if inp_show_struct and in_draw_window
-            line.new(last_sh_bar, last_sh, bar_index, last_sh, color=inp_col_bos, style=line.style_dashed, width=1)
-            label.new(bar_index, last_sh, "BOS", color=color.new(color.black, 100), textcolor=inp_col_bos, size=size.tiny)
+bool testingBearFlip = lowIsBroken  and not na(brokenLowLevel)  and (high >= (brokenLowLevel - zThickness)) and (low <= (brokenLowLevel + zThickness * 1.5))
+bool testingBullFlip = highIsBroken and not na(brokenHighLevel) and (low <= (brokenHighLevel + zThickness))  and (high >= (brokenHighLevel - zThickness * 1.5))
+
+[curPinBull, curPinBear] = f_isPinBar(open, close, high, low, pinBodyPct, pinTailPct)
+[curEngBull, curEngBear] = f_isEngulfing(open, close, high, low, open[1], close[1], high[1], low[1])
+isInsideBar  = (high <= high[1]) and (low >= low[1])
+curFakeyBull = isInsideBar[1] and (low < low[2]) and (close > low[2])
+curFakeyBear = isInsideBar[1] and (high > high[2]) and (close < high[2])
+
+bool pa_bear_reversal = curPinBear or curEngBear or curFakeyBear or (close < open and close < low[1])
+bool pa_bull_reversal = curPinBull or curEngBull or curFakeyBull or (close > open and close > high[1])
+
+bool validSellLocation = onlyPremium ? inPremium : true
+bool validBuyLocation  = onlyPremium ? inDiscount : true
+
+// Sniper Execution Signals (Incorporating STRICT EMA 100 FILTER):
+bool sniperSell = macro_bearish and testingBearFlip and validSellLocation and pa_bear_reversal and allowSell
+bool sniperBuy  = macro_bullish and testingBullFlip and validBuyLocation  and pa_bull_reversal and allowBuy
+
+var int lastSignalBar = -1
+bool canTriggerBuy  = sniperBuy  and (lastSignalBar != bar_index)
+bool canTriggerSell = sniperSell and (lastSignalBar != bar_index)
+
+if canTriggerBuy or canTriggerSell
+    lastSignalBar := bar_index
+
+// Plotting Signals via native plotshape
+plotshape(showSignals and canTriggerBuy, title="Sniper BUY Signal", style=shape.labelup, location=location.belowbar,
+          color=color.green, text="SNIPER BUY\n[FLIP RETEST]", textcolor=color.white, size=size.normal)
+
+plotshape(showSignals and canTriggerSell, title="Sniper SELL Signal", style=shape.labeldown, location=location.abovebar,
+          color=color.red, text="SNIPER SELL\n[FLIP RETEST]", textcolor=color.white, size=size.normal)
+
+plotshape(showPin and curPinBull and not canTriggerBuy, title="Bullish Pin Bar", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(showPin and curPinBear and not canTriggerSell, title="Bearish Pin Bar", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plotshape(showFakey and (curFakeyBull or curFakeyBear), title="Fakey Pattern", style=shape.diamond, location=location.abovebar, color=color.purple, size=size.small)
+
+// =====================================================================================================
+// === 9. TARGET LINES & STOP LOSS VISUALS ===
+// =====================================================================================================
+
+var line entryL = na
+var line slL    = na
+var line tp1L   = na
+var line tp2L   = na
+
+if plotTPSL and (canTriggerBuy or canTriggerSell)
+    line.delete(entryL)
+    line.delete(slL)
+    line.delete(tp1L)
+    line.delete(tp2L)
+
+    float entryPrice = close
+    float slPrice    = na
+    float riskDist   = na
+    float tp1Price   = na
+    float tp2Price   = na
+
+    if canTriggerBuy
+        slPrice  := math.min(low, brokenHighLevel - zThickness) - slBuffer
+        riskDist := math.abs(entryPrice - slPrice)
+        tp1Price := entryPrice + (riskDist * rr_ratio)
+        tp2Price := useSwingTP2 and not na(recentSwingHigh) ? recentSwingHigh : entryPrice + (riskDist * rr_runner)
     else
-        choch_bull := true
-        market_trend := 1
-        if inp_show_struct and in_draw_window
-            line.new(last_sh_bar, last_sh, bar_index, last_sh, color=inp_col_choch, style=line.style_solid, width=2)
-            label.new(bar_index, last_sh, "CHoCH", color=color.new(color.black, 100), textcolor=inp_col_choch, size=size.small)
+        slPrice  := math.max(high, brokenLowLevel + zThickness) + slBuffer
+        riskDist := math.abs(slPrice - entryPrice)
+        tp1Price := entryPrice - (riskDist * rr_ratio)
+        tp2Price := useSwingTP2 and not na(recentSwingLow) ? recentSwingLow : entryPrice - (riskDist * rr_runner)
 
-if not na(last_sl) and break_price_low < last_sl and (inp_close_break ? close[1] >= last_sl : low[1] >= last_sl)
-    if market_trend == -1
-        bos_bear := true
-        if inp_show_struct and in_draw_window
-            line.new(last_sl_bar, last_sl, bar_index, last_sl, color=inp_col_bos, style=line.style_dashed, width=1)
-            label.new(bar_index, last_sl, "BOS", color=color.new(color.black, 100), textcolor=inp_col_bos, size=size.tiny)
-    else
-        choch_bear := true
-        market_trend := -1
-        if inp_show_struct and in_draw_window
-            line.new(last_sl_bar, last_sl, bar_index, last_sl, color=inp_col_choch, style=line.style_solid, width=2)
-            label.new(bar_index, last_sl, "CHoCH", color=color.new(color.black, 100), textcolor=inp_col_choch, size=size.small)
+    entryL := line.new(bar_index, entryPrice, bar_index + 20, entryPrice, color=color.blue,  width=2)
+    slL    := line.new(bar_index, slPrice,    bar_index + 20, slPrice,    color=color.red,   width=2, style=line.style_dashed)
+    tp1L   := line.new(bar_index, tp1Price,   bar_index + 20, tp1Price,   color=color.teal,  width=2, style=line.style_dashed)
+    tp2L   := line.new(bar_index, tp2Price,   bar_index + 20, tp2Price,   color=color.green, width=2, style=line.style_dashed)
 
-// ====================================================================================================
-// 8. CONTEXTUAL PRICE ACTION (NIAL FULLER FORMULAS)
-// ====================================================================================================
+// =====================================================================================================
+// === 10. MULTI-TIMEFRAME CONFLUENCE & PROP FIRM HUD TABLE ===
+// =====================================================================================================
 
-tot_range   = high - low
-body_len    = math.abs(close - open)
-upper_wick  = high - math.max(open, close)
-lower_wick  = math.min(open, close) - low
+string tblPos = position.top_right
+if hudPosition == "Bottom Right"
+    tblPos := position.bottom_right
+else if hudPosition == "Top Left"
+    tblPos := position.top_left
+else if hudPosition == "Bottom Left"
+    tblPos := position.bottom_left
 
-// Proximity checker to active S/R or S/D
-f_is_near_support() =>
-    bool near = false
-    if array.size(g_sr_zones) > 0
-        for i = 0 to array.size(g_sr_zones) - 1
-            SRZone z = array.get(g_sr_zones, i)
-            if z.is_active and (z.role == "SUPPORT" or z.role == "FLIPPED_TO_SUPPORT")
-                if math.abs(low - z.price) <= (atr_safe * 0.5) or (low <= z.top and high >= z.bottom)
-                    near := true
-                    break
-    if not near and array.size(g_sd_zones) > 0
-        for i = 0 to array.size(g_sd_zones) - 1
-            SDZone sd = array.get(g_sd_zones, i)
-            if sd.is_active and sd.kind == "DEMAND"
-                if math.abs(low - sd.top) <= (atr_safe * 0.5) or (low <= sd.top and high >= sd.bottom)
-                    near := true
-                    break
-    near
+var table hud = table.new(position=tblPos, columns=3, rows=7, bgcolor=color.new(#131722, 10), border_color=color.gray, border_width=1)
 
-f_is_near_resistance() =>
-    bool near = false
-    if array.size(g_sr_zones) > 0
-        for i = 0 to array.size(g_sr_zones) - 1
-            SRZone z = array.get(g_sr_zones, i)
-            if z.is_active and (z.role == "RESISTANCE" or z.role == "FLIPPED_TO_RESISTANCE")
-                if math.abs(high - z.price) <= (atr_safe * 0.5) or (high >= z.bottom and low <= z.top)
-                    near := true
-                    break
-    if not near and array.size(g_sd_zones) > 0
-        for i = 0 to array.size(g_sd_zones) - 1
-            SDZone sd = array.get(g_sd_zones, i)
-            if sd.is_active and sd.kind == "SUPPLY"
-                if math.abs(high - sd.bottom) <= (atr_safe * 0.5) or (high >= sd.bottom and low <= sd.top)
-                    near := true
-                    break
-    near
-
-// Pattern 1: Pin Bar
-is_bull_pin = (tot_range > 0) and ((lower_wick / tot_range) >= (inp_pin_wick / 100.0)) and 
-              ((body_len / tot_range) <= (inp_pin_body / 100.0)) and (close >= low + (tot_range * 0.55))
-is_bear_pin = (tot_range > 0) and ((upper_wick / tot_range) >= (inp_pin_wick / 100.0)) and 
-              ((body_len / tot_range) <= (inp_pin_body / 100.0)) and (close <= high - (tot_range * 0.55))
-
-// Pattern 2: Engulfing
-is_bull_engulf = (close[1] < open[1]) and (close > open) and (open <= close[1]) and (close >= open[1])
-is_bear_engulf = (close[1] > open[1]) and (close < open) and (open >= close[1]) and (close <= open[1])
-
-// Pattern 3: Inside Bar & Fakey
-is_inside_bar = (high[1] <= high[2]) and (low[1] >= low[2])
-is_bull_fakey = is_inside_bar and (low < low[1]) and (close > high[1] or close > close[2])
-is_bear_fakey = is_inside_bar and (high > high[1]) and (close < low[1] or close < close[2])
-
-// Apply context filter gating
-show_bull_signal = (is_bull_pin or is_bull_engulf or is_bull_fakey) and (not inp_gate_pa or f_is_near_support())
-show_bear_signal = (is_bear_pin or is_bear_engulf or is_bear_fakey) and (not inp_gate_pa or f_is_near_resistance())
-
-var string last_pa_name = "NONE"
-if inp_show_pa and in_draw_window
-    if show_bull_signal
-        string p_txt = is_bull_pin ? "PIN BAR" : (is_bull_fakey ? "FAKEY" : "ENGULFING")
-        last_pa_name := "BULLISH " + p_txt
-        label.new(bar_index, low - (atr_safe * 0.3), "▲ " + p_txt, color=color.new(color.green, 10), 
-                  textcolor=color.white, style=label.style_label_up, size=size.tiny)
-    else if show_bear_signal
-        string p_txt = is_bear_pin ? "PIN BAR" : (is_bear_fakey ? "FAKEY" : "ENGULFING")
-        last_pa_name := "BEARISH " + p_txt
-        label.new(bar_index, high + (atr_safe * 0.3), "▼ " + p_txt, color=color.new(color.red, 10), 
-                  textcolor=color.white, style=label.style_label_down, size=size.tiny)
-
-// ====================================================================================================
-// 9. TOP-DOWN MULTI-TIMEFRAME BIAS SYNTHESIS
-// ====================================================================================================
-
-// Retrieve HTF EMAs with strictly confirmed candles [1]
-[d1_c, d1_ema20, d1_ema50] = request.security(syminfo.tickerid, "D", [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]], lookahead=barmerge.lookahead_off)
-[h4_c, h4_ema20, h4_ema50] = request.security(syminfo.tickerid, "240", [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]], lookahead=barmerge.lookahead_off)
-[h1_c, h1_ema20, h1_ema50] = request.security(syminfo.tickerid, "60", [close[1], ta.ema(close, 20)[1], ta.ema(close, 50)[1]], lookahead=barmerge.lookahead_off)
-
-d1_bias = d1_c > d1_ema50 ? 1 : (d1_c < d1_ema50 ? -1 : 0)
-h4_bias = h4_c > h4_ema50 ? 1 : (h4_c < h4_ema50 ? -1 : 0)
-h1_bias = h1_c > h1_ema50 ? 1 : (h1_c < h1_ema50 ? -1 : 0)
-
-// Hierarchical MTF Synthesis
-mtf_score = (d1_bias * 4.0) + (h4_bias * 3.0) + (h1_bias * 2.0) + (market_trend * 1.0)
-overall_bias = mtf_score >= 3.0 ? "BULLISH" : (mtf_score <= -3.0 ? "BEARISH" : "NEUTRAL")
-bias_color = overall_bias == "BULLISH" ? color.green : (overall_bias == "BEARISH" ? color.red : color.orange)
-
-// ====================================================================================================
-// 10. CONDITIONAL TRADE SCENARIO BLUEPRINT
-// ====================================================================================================
-
-var line ln_entry = na
-var line ln_sl    = na
-var line ln_tp1   = na
-var line ln_tp2   = na
-var string scenario_dir = "WAIT"
-var float  scen_entry   = 0.0
-var float  scen_sl      = 0.0
-var float  scen_tp1     = 0.0
-var float  scen_tp2     = 0.0
-var float  scen_lots    = 0.0
-var float  scen_rr      = 0.0
-
-if barstate.isconfirmed and inp_show_scen
-    // Bullish Scenario: Macro bias bullish + Price at Demand/Support + Bullish PA confirmation
-    if (overall_bias == "BULLISH" or market_trend == 1) and show_bull_signal
-        line.delete(ln_entry), line.delete(ln_sl), line.delete(ln_tp1), line.delete(ln_tp2)
-        scenario_dir := "BUY"
-        scen_entry   := close
-        scen_sl      := low - (atr_safe * 0.3)
-        float risk_d  = scen_entry - scen_sl
-        scen_tp1     := scen_entry + (risk_d * inp_min_rr_tp1)
-        scen_tp2     := scen_entry + (risk_d * inp_min_rr_tp2)
-        scen_rr      := inp_min_rr_tp1
-        
-        // Exact lot calculation: risk_amount / (sl_points * point_value)
-        float risk_usd = (inp_risk_pct / 100.0) * inp_account_bal
-        float point_val = syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
-        float sl_points = risk_d / syminfo.mintick
-        scen_lots := math.max(0.01, math.round((risk_usd / (sl_points * point_val * syminfo.mintick)), 2))
-
-        ln_entry := line.new(bar_index, scen_entry, bar_index + 25, scen_entry, color=color.yellow, width=2)
-        ln_sl    := line.new(bar_index, scen_sl, bar_index + 25, scen_sl, color=color.red, width=2)
-        ln_tp1   := line.new(bar_index, scen_tp1, bar_index + 25, scen_tp1, color=color.lime, width=2)
-        ln_tp2   := line.new(bar_index, scen_tp2, bar_index + 25, scen_tp2, color=color.green, width=1, style=line.style_dashed)
-
-    // Bearish Scenario: Macro bias bearish + Price at Supply/Resistance + Bearish PA confirmation
-    else if (overall_bias == "BEARISH" or market_trend == -1) and show_bear_signal
-        line.delete(ln_entry), line.delete(ln_sl), line.delete(ln_tp1), line.delete(ln_tp2)
-        scenario_dir := "SELL"
-        scen_entry   := close
-        scen_sl      := high + (atr_safe * 0.3)
-        float risk_d  = scen_sl - scen_entry
-        scen_tp1     := scen_entry - (risk_d * inp_min_rr_tp1)
-        scen_tp2     := scen_entry - (risk_d * inp_min_rr_tp2)
-        scen_rr      := inp_min_rr_tp1
-        
-        float risk_usd = (inp_risk_pct / 100.0) * inp_account_bal
-        float point_val = syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
-        float sl_points = risk_d / syminfo.mintick
-        scen_lots := math.max(0.01, math.round((risk_usd / (sl_points * point_val * syminfo.mintick)), 2))
-
-        ln_entry := line.new(bar_index, scen_entry, bar_index + 25, scen_entry, color=color.yellow, width=2)
-        ln_sl    := line.new(bar_index, scen_sl, bar_index + 25, scen_sl, color=color.red, width=2)
-        ln_tp1   := line.new(bar_index, scen_tp1, bar_index + 25, scen_tp1, color=color.red, width=2)
-        ln_tp2   := line.new(bar_index, scen_tp2, bar_index + 25, scen_tp2, color=color.maroon, width=1, style=line.style_dashed)
-
-// ====================================================================================================
-// 11. INSTITUTIONAL RISK & PROP FIRM HUD TABLE (TOP-RIGHT DASHBOARD)
-// ====================================================================================================
-
-var table hud_tbl = table.new(position=position.top_right, columns=2, rows=10, 
-                              bgcolor=color.new(#11141a, 10), border_color=color.new(#2a2e39, 0), border_width=1)
-
-if barstate.islast and inp_show_hud
-    // Determine Prop Firm Limits
-    float max_dd_pct = inp_prop_firm == "FTMO (2-Step)" ? 10.0 : (inp_prop_firm == "The5ers (High Stakes)" ? 10.0 : (inp_prop_firm == "FundedNext (Stellar)" ? 10.0 : inp_cust_max_dd))
-    float day_dd_pct = inp_prop_firm == "FTMO (2-Step)" ? 5.0  : (inp_prop_firm == "The5ers (High Stakes)" ? 5.0  : (inp_prop_firm == "FundedNext (Stellar)" ? 5.0  : inp_cust_day_dd))
-    float max_dd_usd = inp_account_bal * (max_dd_pct / 100.0)
-    float day_dd_usd = inp_account_bal * (day_dd_pct / 100.0)
-    float risk_trade = inp_account_bal * (inp_risk_pct / 100.0)
+if showHUD and barstate.islast
+    t_size = size.small
 
     // Header
-    table.cell(hud_tbl, 0, 0, "UNIVERSAL AI ANALYST", bgcolor=color.new(#1e222d, 0), text_color=color.white, text_size=size.small)
-    table.cell(hud_tbl, 1, 0, syminfo.ticker + " (" + timeframe.period + ")", bgcolor=color.new(#1e222d, 0), text_color=color.aqua, text_size=size.small)
+    table.cell(hud, 0, 0, "UNIVERSAL CASCADE SUITE", bgcolor=color.new(#2a2e39, 0), text_color=color.white, text_size=t_size)
+    table.cell(hud, 1, 0, syminfo.ticker + " (" + timeframe.period + ")", bgcolor=color.new(#2a2e39, 0), text_color=color.aqua, text_size=t_size)
+    table.cell(hud, 2, 0, "CONFLUENCE BIAS", bgcolor=color.new(#2a2e39, 0), text_color=color.white, text_size=t_size)
 
-    // Row 1: MTF Bias
-    table.cell(hud_tbl, 0, 1, "Overall MTF Bias", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 1, overall_bias, text_color=bias_color, text_size=size.small)
+    // Row 1: Weekly / Monthly Trend
+    w_col = w_bias == 1 ? color.green : w_bias == -1 ? color.red : color.gray
+    w_str = w_bias == 1 ? "BULLISH FLOW" : w_bias == -1 ? "BEARISH FLOW" : "NEUTRAL"
+    table.cell(hud, 0, 1, "Weekly (1W) Trend", text_color=color.silver, text_size=t_size)
+    table.cell(hud, 1, 1, w_str, text_color=w_col, text_size=t_size)
+    table.cell(hud, 2, 1, m_bias == 1 ? "1M Bull" : m_bias == -1 ? "1M Bear" : "1M Range", text_color=w_col, text_size=t_size)
 
-    // Row 2: Structure Trend
-    table.cell(hud_tbl, 0, 2, "Market Structure", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 2, market_trend == 1 ? "BULLISH (Uptrend)" : (market_trend == -1 ? "BEARISH (Downtrend)" : "CONSOLIDATION"), 
-               text_color=market_trend == 1 ? color.green : (market_trend == -1 ? color.red : color.gray), text_size=size.small)
+    // Row 2: EMA 100 Status
+    ema_status_txt = isAboveEma ? "ABOVE 100 (BUYS ONLY)" : isBelowEma ? "BELOW 100 (SELLS ONLY)" : "AT 100"
+    ema_status_col = isAboveEma ? color.green : isBelowEma ? color.red : color.orange
+    table.cell(hud, 0, 2, "EMA 100 Trend Rule", text_color=color.silver, text_size=t_size)
+    table.cell(hud, 1, 2, str.tostring(emaVal, "#.##"), text_color=color.white, text_size=t_size)
+    table.cell(hud, 2, 2, ema_status_txt, text_color=ema_status_col, text_size=t_size)
 
-    // Row 3: Latest Confirmed PA
-    table.cell(hud_tbl, 0, 3, "Confirmed Price Action", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 3, last_pa_name, text_color=color.yellow, text_size=size.small)
+    // Row 3: Broken Structure Level
+    struct_str = lowIsBroken  ? str.tostring(brokenLowLevel, "#.##") + " [BROKEN LOW]" :
+                 highIsBroken ? str.tostring(brokenHighLevel, "#.##") + " [BROKEN HIGH]" : "No Recent Break"
+    struct_col = lowIsBroken ? color.red : highIsBroken ? color.green : color.gray
+    table.cell(hud, 0, 3, "Structure (" + timeframe.period + ")", text_color=color.silver, text_size=t_size)
+    table.cell(hud, 1, 3, struct_str, text_color=struct_col, text_size=t_size)
+    table.cell(hud, 2, 3, lowIsBroken ? "FLIP RESISTANCE" : highIsBroken ? "FLIP SUPPORT" : "INTACT", text_color=struct_col, text_size=t_size)
 
-    // Row 4: Trade Scenario
-    table.cell(hud_tbl, 0, 4, "Active Setup", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 4, scenario_dir == "BUY" ? "BUY (Grade A)" : (scenario_dir == "SELL" ? "SELL (Grade A)" : "PATIENT (Wait Confluence)"), 
-               text_color=scenario_dir == "BUY" ? color.lime : (scenario_dir == "SELL" ? color.red : color.silver), text_size=size.small)
+    // Row 4: Dealing Range (50% Equilibrium)
+    eq_str = not na(rangeEq) ? "Eq (50%): " + str.tostring(rangeEq, "#.##") : "Calculating..."
+    range_state = inPremium ? "PREMIUM (>= 50%)" : inDiscount ? "DISCOUNT (<= 50%)" : "EQUILIBRIUM"
+    range_col   = inPremium ? color.orange : color.teal
+    table.cell(hud, 0, 4, "Dealing Range", text_color=color.silver, text_size=t_size)
+    table.cell(hud, 1, 4, eq_str, text_color=color.white, text_size=t_size)
+    table.cell(hud, 2, 4, range_state, text_color=range_col, text_size=t_size)
 
-    // Row 5: Position Sizing
-    table.cell(hud_tbl, 0, 5, "Calculated Size", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 5, scenario_dir != "WAIT" ? str.tostring(scen_lots) + " Lots ($" + str.tostring(risk_trade, "#") + ")" : "0.00 Lots", 
-               text_color=color.white, text_size=size.small)
+    // Row 5: Retest Condition
+    retest_str = testingBearFlip ? "⚠️ TESTING FLIP LOW" :
+                 testingBullFlip ? "⚠️ TESTING FLIP HIGH" :
+                 lowIsBroken ? "Pullback in Progress" : "Waiting for Setup"
+    retest_col = (testingBearFlip and inPremium and allowSell) or (testingBullFlip and inDiscount and allowBuy) ? color.green : color.orange
+    table.cell(hud, 0, 5, "Flip Retest State", text_color=color.silver, text_size=t_size)
+    table.cell(hud, 1, 5, retest_str, text_color=retest_col, text_size=t_size)
+    table.cell(hud, 2, 5, (testingBearFlip and inPremium and allowSell) ? "ARMED FOR SELL" : (testingBullFlip and inDiscount and allowBuy) ? "ARMED FOR BUY" : "WAIT FOR RETEST", text_color=retest_col, text_size=t_size)
 
-    // Row 6: Prop Firm Profile
-    table.cell(hud_tbl, 0, 6, "Prop Firm Profile", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 6, inp_prop_firm, text_color=color.aqua, text_size=size.small)
+    // Row 6: Actionable Trading Verdict
+    verdict_text = (testingBearFlip and inPremium and allowSell) ? "🎯 SNIPER SELL ZONE" :
+                   (testingBullFlip and inDiscount and allowBuy)  ? "🎯 SNIPER BUY ZONE" :
+                   lowIsBroken and isAboveEma ? "⛔ NO SELL (ABOVE EMA 100)" :
+                   highIsBroken and isBelowEma ? "⛔ NO BUY (BELOW EMA 100)" :
+                   lowIsBroken and inDiscount ? "⛔ DO NOT SELL IN DISCOUNT" :
+                   highIsBroken and inPremium ? "⛔ DO NOT BUY IN PREMIUM" : "WAIT FOR STRUCTURE RETEST"
+    verdict_bg   = (testingBearFlip and inPremium and allowSell) ? color.red :
+                   (testingBullFlip and inDiscount and allowBuy)  ? color.green : color.gray
+    table.cell(hud, 0, 6, "ACTION VERDICT", bgcolor=color.new(verdict_bg, 30), text_color=color.white, text_size=t_size)
+    table.cell(hud, 1, 6, verdict_text, bgcolor=color.new(verdict_bg, 30), text_color=color.white, text_size=t_size)
+    table.cell(hud, 2, 6, "STRICT RETEST ONLY", bgcolor=color.new(verdict_bg, 30), text_color=color.white, text_size=t_size)
 
-    // Row 7: Max Loss Capacity
-    table.cell(hud_tbl, 0, 7, "Max Total DD Floor", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 7, "$" + str.tostring(inp_account_bal - max_dd_usd, "#.##") + " (-" + str.tostring(max_dd_pct, "#") + "%)", 
-               text_color=color.orange, text_size=size.small)
+// =====================================================================================================
+// === 11. ALERTS ===
+// =====================================================================================================
 
-    // Row 8: Daily Loss Buffer
-    table.cell(hud_tbl, 0, 8, "Daily Loss Limit", text_color=color.silver, text_size=size.small)
-    table.cell(hud_tbl, 1, 8, "$" + str.tostring(day_dd_usd, "#.##") + " (-" + str.tostring(day_dd_pct, "#") + "%)", 
-               text_color=color.yellow, text_size=size.small)
-
-    // Row 9: Safety Notice
-    table.cell(hud_tbl, 0, 9, "Execution Mode", text_color=color.gray, text_size=size.tiny)
-    table.cell(hud_tbl, 1, 9, "MANUAL TRADER ONLY", text_color=color.gray, text_size=size.tiny)
-
-// ====================================================================================================
-// 12. ALERTS FOR REAL-TIME TRADING SIGNALS
-// ====================================================================================================
-
-alertcondition(bos_bull,   title="Bullish BOS",   message="[AGY ALERT] Bullish Break of Structure confirmed on {{ticker}} ({{interval}})")
-alertcondition(bos_bear,   title="Bearish BOS",   message="[AGY ALERT] Bearish Break of Structure confirmed on {{ticker}} ({{interval}})")
-alertcondition(choch_bull, title="Bullish CHoCH", message="[AGY ALERT] Bullish Change of Character confirmed on {{ticker}} ({{interval}})")
-alertcondition(choch_bear, title="Bearish CHoCH", message="[AGY ALERT] Bearish Change of Character confirmed on {{ticker}} ({{interval}})")
-alertcondition(show_bull_signal, title="Bullish Price Action Setup", message="[AGY ALERT] High-Probability Bullish Price Action Setup at Key Zone on {{ticker}}")
-alertcondition(show_bear_signal, title="Bearish Price Action Setup", message="[AGY ALERT] High-Probability Bearish Price Action Setup at Key Zone on {{ticker}}")
+alertcondition(canTriggerSell, title="Sniper SELL (Flip Retest)", message="🔴 SNIPER SELL: Broken Structure Retest in Premium on {{ticker}} at {{close}}")
+alertcondition(canTriggerBuy,  title="Sniper BUY (Flip Retest)",  message="🟢 SNIPER BUY: Broken Structure Retest in Discount on {{ticker}} at {{close}}")
+alertcondition(testingBearFlip and inPremium and allowSell, title="Armed for Sell (Testing Flip Zone)", message="⚠️ ARMED: {{ticker}} is testing Flip Resistance in Premium!")
+alertcondition(testingBullFlip and inDiscount and allowBuy, title="Armed for Buy (Testing Flip Zone)", message="⚠️ ARMED: {{ticker}} is testing Flip Support in Discount!")

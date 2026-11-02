@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                     UniversalCandleCascadeEA.mq5 |
+//|                                           PRO_CANDLE_CASCADE.mq5 |
 //|                                  Copyright 2026, Antigravity AI  |
 //|    Professional Multi-Timeframe Break & Retest Cascade Engine   |
 //|  (W1+D1 Context -> Key Broken S/R in Dealing Range -> H1 Entry)  |
@@ -50,12 +50,15 @@ input int               InpCairoStartHour     = 15;                  // Cairo Se
 input int               InpCairoEndHour       = 23;                  // Cairo Session End Hour (23:00 = Market Close)
 input int               InpMaxTradesPerDay    = 1;                   // Max Trades per Day (A+ Setups Only)
 
-input group "=== 2. Multi-Timeframe Structure & Breakout Rules ==="
-input bool              InpRequireD1Trend     = true;                // Require Daily 20 EMA Trend Alignment
+input group "=== 2. Multi-Timeframe Structure & EMA 100 Rule ==="
+input bool              InpUseEMA100Filter    = true;                // Enforce Strict EMA 100 Rule ("مافيش بيع فوق 100 و العكس")
+input int               InpEMA100Period       = 100;                 // EMA Period (100)
+input ENUM_TIMEFRAMES   InpEMA100TF           = PERIOD_H4;           // EMA Timeframe (H4 or D1)
 input bool              InpRequireCandleColor = true;                // Require Rejection Candle (Red for Sell, Green for Buy)
 input int               InpStructureSwingBars = 2;                   // Structure Swing Fractal Radius (2 = 5-bar swing)
 input int               InpStructureLookback  = 80;                  // Lookback Bars for Structure Swings
 input double            InpRetestTolerancePoints = 250.0;            // Retest Tolerance Points (25 pts on Nas, 2.5 on Gold)
+input int               InpMaxLossesPerDay    = 1;                   // Max Losses Per Day (Stop Trading on Bad Days)
 
 input group "=== 3. Smart Money Dealing Range (Discount vs Premium) ==="
 input bool              InpRequirePremiumDiscount = true;            // Require Retest in Premium (Sell) / Discount (Buy)
@@ -63,13 +66,13 @@ input double            InpEquilibriumPct     = 50.0;                // 50% Deal
 
 input group "=== 4. Risk & Target Management (FundingPips Compliant) ==="
 input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Mode
-input double            InpRiskPercent        = 1.0;                 // Risk Percent per Trade (1.0%)
+input double            InpRiskPercent        = 1.5;                 // Risk Percent per Trade (1.5%)
 input double            InpFixedLot           = 0.01;                // Fixed Lot Size
 input double            InpSLBufferDollars    = 35.0;                // Stop Loss Buffer (35 pts on Nas, 2.5 on Gold)
 input double            InpRR_Ratio           = 1.5;                 // Take Profit Risk-to-Reward Ratio (1:1.5)
-input bool              InpCloseFullOnTP1     = true;                // Bank Full Profit at TP1 (Guaranteed Win Rate)
-input double            InpPartialClosePct    = 80.0;                // Partial Close % at TP1 (if CloseFullOnTP1 is false)
-input bool              InpEnableRunnerTP     = false;               // Enable Runner TP to Impulse Floor/Ceiling
+input bool              InpCloseFullOnTP1     = false;               // Bank Full Profit at TP1
+input double            InpPartialClosePct    = 50.0;                // Partial Close % at TP1
+input bool              InpEnableRunnerTP     = true;                // Target Previous Swing Floor/Ceiling (Full Move)
 input double            InpMaxSpreadPoints    = 500.0;               // Max Allowed Spread (Points)
 
 input group "=== 5. Prop Firm Guardian ==="
@@ -92,6 +95,7 @@ int            g_tradesTodayCount = 0;
 int            g_currentDayOfYear = -1;
 double         g_dayStartEquity   = 0.0;
 bool           g_dailyCircuitBreaker = false;
+int            g_hEMA100         = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 //| Calculate Cairo Hour accounting for Egypt Daylight Saving Time   |
@@ -130,7 +134,16 @@ int OnInit()
 
    ArrayResize(g_zones, 0);
 
-   PrintFormat("UniversalCandleCascadeEA V6.0 Initialized on %s | Structure TF: %s | Exec TF: %s",
+   if(InpUseEMA100Filter)
+   {
+      g_hEMA100 = iMA(_Symbol, InpEMA100TF, InpEMA100Period, 0, MODE_EMA, PRICE_CLOSE);
+      if(g_hEMA100 == INVALID_HANDLE)
+         PrintFormat("WARNING: Failed to create EMA 100 indicator handle on %s!", EnumToString(InpEMA100TF));
+      else
+         PrintFormat("EMA 100 Handle successfully created on %s (%s)", _Symbol, EnumToString(InpEMA100TF));
+   }
+
+   PrintFormat("PRO CANDLE CASCADE V6.0 Initialized on %s | Structure TF: %s | Exec TF: %s",
                _Symbol, EnumToString(InpStructureTF), EnumToString(InpExecTF));
 
    return(INIT_SUCCEEDED);
@@ -141,6 +154,11 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   if(g_hEMA100 != INVALID_HANDLE)
+   {
+      IndicatorRelease(g_hEMA100);
+      g_hEMA100 = INVALID_HANDLE;
+   }
    ArrayResize(g_zones, 0);
 }
 
@@ -168,7 +186,7 @@ void CheckDailyReset()
       {
          if(!g_dailyCircuitBreaker)
          {
-            PrintFormat("UniversalCandleCascadeEA: Daily Loss Circuit Breaker Triggered! Loss: %.2f%% >= Limit: %.2f%%",
+            PrintFormat("PRO CANDLE CASCADE: Daily Loss Circuit Breaker Triggered! Loss: %.2f%% >= Limit: %.2f%%",
                         lossPct, InpMaxDailyLossPct);
             g_dailyCircuitBreaker = true;
          }
@@ -205,6 +223,7 @@ void UpdateBrokenStructureZones()
       {
          double swingLowPrice = s_rates[i].low;
 
+         // Check if a subsequent bar closed below this swing low
          for(int k = i - 1; k >= 0; k--)
          {
             if(s_rates[k].close < swingLowPrice)
@@ -213,7 +232,7 @@ void UpdateBrokenStructureZones()
                int totalZones = ArraySize(g_zones);
                for(int z = 0; z < totalZones; z++)
                {
-                  if(MathAbs(g_zones[z].level - swingLowPrice) < (2.0 * _Point))
+                  if(g_zones[z].active && MathAbs(g_zones[z].level - swingLowPrice) < (2.0 * _Point))
                   {
                      exists = true;
                      break;
@@ -271,7 +290,7 @@ void UpdateBrokenStructureZones()
                int totalZones = ArraySize(g_zones);
                for(int z = 0; z < totalZones; z++)
                {
-                  if(MathAbs(g_zones[z].level - swingHighPrice) < (2.0 * _Point))
+                  if(g_zones[z].active && MathAbs(g_zones[z].level - swingHighPrice) < (2.0 * _Point))
                   {
                      exists = true;
                      break;
@@ -376,7 +395,7 @@ void ManageOpenPositions()
                   if(InpCloseFullOnTP1)
                   {
                      m_trade.PositionClose(ticket);
-                     PrintFormat("UniversalCandleCascadeEA: Full Position Closed at TP1 (+%.2fR) | Ticket: %d",
+                     PrintFormat("PRO CANDLE CASCADE V6.0: Full Position Closed at TP1 (+%.2fR) | Ticket: %d",
                                  InpRR_Ratio, ticket);
                   }
                   else
@@ -409,7 +428,7 @@ void ManageOpenPositions()
                   if(InpCloseFullOnTP1)
                   {
                      m_trade.PositionClose(ticket);
-                     PrintFormat("UniversalCandleCascadeEA: Full Position Closed at TP1 (+%.2fR) | Ticket: %d",
+                     PrintFormat("PRO CANDLE CASCADE V6.0: Full Position Closed at TP1 (+%.2fR) | Ticket: %d",
                                  InpRR_Ratio, ticket);
                   }
                   else
@@ -454,26 +473,40 @@ int CountTotalPositions()
 }
 
 //+------------------------------------------------------------------+
-//| Get D1 20 EMA Trend Alignment (strictly from closed D1 bar)       |
+//| Get EMA 100 Trend Rule strictly: "مافيش بيع فوق 100 و العكس"      |
 //+------------------------------------------------------------------+
-void GetD1Trend(bool &d1_bull, bool &d1_bear)
+void GetEMA100Trend(bool &allow_buy, bool &allow_sell)
 {
-   d1_bull = false;
-   d1_bear = false;
-   int hMA = iMA(_Symbol, PERIOD_D1, 20, 0, MODE_EMA, PRICE_CLOSE);
-   if(hMA == INVALID_HANDLE) return;
+   allow_buy = true;
+   allow_sell = true;
+   if(!InpUseEMA100Filter) return;
+
+   if(g_hEMA100 == INVALID_HANDLE)
+   {
+      g_hEMA100 = iMA(_Symbol, InpEMA100TF, InpEMA100Period, 0, MODE_EMA, PRICE_CLOSE);
+      if(g_hEMA100 == INVALID_HANDLE) return;
+   }
 
    double maVal[1];
-   if(CopyBuffer(hMA, 0, 1, 1, maVal) >= 1)
+   if(CopyBuffer(g_hEMA100, 0, 1, 1, maVal) >= 1)
    {
-      MqlRates dRates[1];
-      if(CopyRates(_Symbol, PERIOD_D1, 1, 1, dRates) >= 1)
+      MqlRates tfRates[1];
+      if(CopyRates(_Symbol, InpEMA100TF, 1, 1, tfRates) >= 1)
       {
-         if(dRates[0].close > maVal[0]) d1_bull = true;
-         else if(dRates[0].close < maVal[0]) d1_bear = true;
+         if(tfRates[0].close > maVal[0])
+         {
+            // Price is ABOVE EMA 100: ONLY BUY! NO SELL!
+            allow_buy  = true;
+            allow_sell = false;
+         }
+         else if(tfRates[0].close < maVal[0])
+         {
+            // Price is BELOW EMA 100: ONLY SELL! NO BUY!
+            allow_buy  = false;
+            allow_sell = true;
+         }
       }
    }
-   IndicatorRelease(hMA);
 }
 
 //+------------------------------------------------------------------+
@@ -505,6 +538,31 @@ void OnTick()
       if(dt.day_of_week == 5 && cairoHour >= 22) return; // Friday gap protection
    }
 
+   // Daily Loss Cap Protection (FundingPips): Stop if daily losses reached
+   if(InpMaxLossesPerDay > 0)
+   {
+      datetime dayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE) + " 00:00:00");
+      HistorySelect(dayStart, TimeCurrent());
+      int closedDeals = HistoryDealsTotal();
+      int lossesToday = 0;
+      for(int i = 0; i < closedDeals; i++)
+      {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(ticket > 0)
+         {
+            long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+            long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+            string sym = HistoryDealGetString(ticket, DEAL_SYMBOL);
+            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            if(sym == _Symbol && magic == InpMagicNumber && entry == DEAL_ENTRY_OUT)
+            {
+               if(profit < 0.0) lossesToday++;
+            }
+         }
+      }
+      if(lossesToday >= InpMaxLossesPerDay) return;
+   }
+
    // Max daily trades limit (FundingPips: 1 high-quality trade per day)
    if(g_tradesTodayCount >= InpMaxTradesPerDay) return;
    if(CountTotalPositions() > 0) return;
@@ -516,10 +574,9 @@ void OnTick()
    // 5. Update Broken Structure Zones
    UpdateBrokenStructureZones();
 
-   // 6. Trend Confluence
-   bool d1_bull = false, d1_bear = false;
-   if(InpRequireD1Trend)
-      GetD1Trend(d1_bull, d1_bear);
+   // 6. Trend Confluence: Strict EMA 100 Rule ("مافيش بيع طول ما هو فوق 100 و العكس")
+   bool allow_buy = true, allow_sell = true;
+   GetEMA100Trend(allow_buy, allow_sell);
 
    // Intraday Execution Bar (Last completed H1 bar)
    MqlRates h1_rates[];
@@ -548,7 +605,7 @@ void OnTick()
       // --- SELL SETUP (Broken Support -> Resistance Retest in Premium) ---
       if(g_zones[z].type == ZONE_BROKEN_SUPPORT_SELL)
       {
-         if(InpRequireD1Trend && !d1_bear) continue;
+         if(!allow_sell) continue;
 
          // Update lowest low reached by the move
          if(b_low < g_zones[z].impulse_extreme)
@@ -564,8 +621,8 @@ void OnTick()
 
          if(inPremium && touchedLevel)
          {
-            // Retest Rejection: candle closed back below the broken level
-            if(b_close <= level && (!InpRequireCandleColor || b_close < b_open))
+            // Retest Rejection or Liquidity Sweep: candle closed back near/below the broken level
+            if(b_close <= (level + tol) && (!InpRequireCandleColor || b_close < b_open))
             {
                double slPrice = b_high + slBuffer;
                double riskDist = slPrice - currentBid;
@@ -583,14 +640,14 @@ void OnTick()
                      g_tradesTodayCount++;
                      g_zones[z].tested = true;
                      g_zones[z].active = false;
-                     PrintFormat("UniversalCandleCascadeEA: Executed SELL Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
+                     PrintFormat("PRO CANDLE CASCADE V6.0: Executed SELL Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
                                  currentBid, slPrice, riskDist, tpPrice, lot);
                      break;
                   }
                }
             }
             // Invalidation: if price closes decisively above the level, zone is blown and deleted
-            else if(b_close > (level + 2.5 * tol))
+            else if(b_close > (level + 4.0 * tol))
             {
                g_zones[z].active = false;
             }
@@ -599,7 +656,7 @@ void OnTick()
       // --- BUY SETUP (Broken Resistance -> Support Retest in Discount) ---
       else if(g_zones[z].type == ZONE_BROKEN_RESIST_BUY)
       {
-         if(InpRequireD1Trend && !d1_bull) continue;
+         if(!allow_buy) continue;
 
          // Update highest high reached by the move
          if(b_high > g_zones[z].impulse_extreme)
@@ -615,8 +672,8 @@ void OnTick()
 
          if(inDiscount && touchedLevel)
          {
-            // Retest Bounce: candle closed back above the broken level
-            if(b_close >= level && (!InpRequireCandleColor || b_close > b_open))
+            // Retest Bounce or Liquidity Sweep: candle closed back near/above the broken level
+            if(b_close >= (level - tol) && (!InpRequireCandleColor || b_close > b_open))
             {
                double slPrice = b_low - slBuffer;
                double riskDist = currentAsk - slPrice;
@@ -634,14 +691,14 @@ void OnTick()
                      g_tradesTodayCount++;
                      g_zones[z].tested = true;
                      g_zones[z].active = false;
-                     PrintFormat("UniversalCandleCascadeEA: Executed BUY Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
+                     PrintFormat("PRO CANDLE CASCADE V6.0: Executed BUY Retest at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lot: %.2f",
                                  currentAsk, slPrice, riskDist, tpPrice, lot);
                      break;
                   }
                }
             }
             // Invalidation: if price closes decisively below the level, zone is blown and deleted
-            else if(b_close < (level - 2.5 * tol))
+            else if(b_close < (level - 4.0 * tol))
             {
                g_zones[z].active = false;
             }
