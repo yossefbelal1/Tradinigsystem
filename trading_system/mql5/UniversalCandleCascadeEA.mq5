@@ -68,10 +68,10 @@ input double            InpEquilibriumPct     = 50.0;                // 50% Deal
 
 input group "=== 4. Risk & Target Management (FundingPips Compliant) ==="
 input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Mode
-input double            InpRiskPercent        = 1.5;                 // Risk Percent per Trade (1.5%)
+input double            InpRiskPercent        = 2.0;                 // Risk Percent per Trade (2.0%)                 // Risk Percent per Trade (1.5%)
 input double            InpFixedLot           = 0.01;                // Fixed Lot Size
 input double            InpSLBufferDollars    = 75.0;                // Stop Loss Buffer (35 pts on Nas, 2.5 on Gold)
-input double            InpRR_Ratio           = 1.5;                 // Take Profit Risk-to-Reward Ratio (1:1.5)
+input double            InpRR_Ratio           = 2.5;                 // Take Profit Risk-to-Reward Ratio (1:2.5)                 // Take Profit Risk-to-Reward Ratio (1:1.5)
 input bool              InpCloseFullOnTP1     = true;               // Bank Full Profit at TP1
 input double            InpPartialClosePct    = 0.0;                // Partial Close % at TP1
 input bool              InpEnableRunnerTP     = false;
