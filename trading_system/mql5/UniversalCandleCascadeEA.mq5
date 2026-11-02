@@ -1,13 +1,12 @@
 //+------------------------------------------------------------------+
-//|                                     UniversalCandleCascadeEA.mq5 |
+//|                                           PRO_CANDLE_CASCADE.mq5 |
 //|                                  Copyright 2026, Antigravity AI  |
-//|               Universal Top-Down Candle Anticipation Cascade EA  |
-//|        (MN1 Macro -> W1 Bias -> D1 Expansion -> Intraday Sniping)|
+//|               Multi-Timeframe Candle Momentum & S/R Cascade EA   |
+//|             (W1+D1 Supply/Demand Bias -> Today Open -> M15 Entry)|
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Antigravity AI"
-#property link      "https://github.com/yossefbelal1/Tradinigsystem"
-#property version   "2.00"
-#property description "Professional Top-Down Multi-Timeframe Candle Momentum & S/R Cascade Expert Advisor"
+#property link      "https://github.com/Antigravity-AI"
+#property version   "3.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -16,127 +15,78 @@
 #include <Trade\AccountInfo.mqh>
 
 //--- Enums
-enum ENUM_EXECUTION_MODE
+enum ENUM_ENTRY_TYPE
 {
-   MODE_MANUAL_SEMI_AUTO = 0, // Semi-Automatic (One-Click Chart Execution Button)
-   MODE_FULL_AUTOMATIC   = 1  // Fully Automatic (Executes immediately upon Bar Confirmation)
+   ENTRY_MARKET_INSTANT = 0, // Market Execution
+   ENTRY_PENDING_STOP   = 1  // Pending Stop Order (Breakout)
 };
 
-enum ENUM_RISK_MODE
+enum ENUM_RISK_TYPE
 {
-   RISK_PERCENT_EQUITY = 0,   // Risk % of Current Equity (Institutional / Prop Firm)
-   RISK_FIXED_LOT      = 1    // Fixed Lot Size
+   RISK_PERCENT = 0,         // Risk % of Equity
+   RISK_FIXED   = 1          // Fixed Lot Size
 };
 
 //--- Input Parameters
-input group "=== 1. Execution Mode & Magic Number ==="
-input ulong                InpMagicNumber        = 888999;               // Magic Number
-input ENUM_EXECUTION_MODE  InpExecutionMode      = MODE_MANUAL_SEMI_AUTO;// Initial Execution Mode
-input bool                 InpEnableSound        = true;                 // Enable Alert Sound on Setup
-input int                  InpMaxTradesPerDay    = 2;                    // Max Allowed Trades per Day
-input double               InpMaxSpreadPoints    = 500.0;                // Max Allowed Spread (Points)
+input group "=== 1. Execution & Timing Window ==="
+input ulong             InpMagicNumber        = 777999;              // Magic Number
+input ENUM_TIMEFRAMES   InpExecTF             = PERIOD_M15;          // Intraday Execution Timeframe (M15 or M30)
+input ENUM_ENTRY_TYPE   InpEntryType          = ENTRY_MARKET_INSTANT;// Entry Order Type
+input int               InpStartHour          = 13;                  // Session Start Hour (13:00 NY Open Expansion)
+input int               InpEndHour            = 21;                  // Session End Hour (21:00 NY Close)
+input int               InpMaxTradesPerDay    = 2;                   // Max Trades per Day
+input int               InpMaxDailyLosses     = 1;                   // Max Losses per Day (1 = Stop trading if 1 trade loses)
 
-input group "=== 2. Top-Down Cascade Alignment (MN1 -> W1 -> D1) ==="
-input bool                 InpRequireMN1Filter   = true;                 // Check Monthly (MN1) Macro Structure & POI
-input bool                 InpRequireW1Candle    = true;                 // Require Weekly (W1) Expected Candle Confluence
-input bool                 InpRequireD1Candle    = true;                 // Require Daily (D1) Yesterday PA & Today Expansion
-input int                  InpSwingLookbackBars  = 50;                   // Swing High/Low Lookback Bars
+input group "=== 2. Multi-Timeframe Alignment & Supply/Demand Bias ==="
+input bool              InpRequireW1Confluence= true;                // Require W1 Weekly Candle / Zone Agreement
+input bool              InpRequireD1Confluence= true;                // Require D1 Yesterday Confirmation
+input bool              InpRequireTodayExp    = true;                // Require Today Expansion (Above/Below Today Open)
+input bool              InpUseSupplyDemandBias= true;                // Use W1 & D1 Supply/Demand Zones for Daily Bias
+input int               InpW1LookbackBars     = 26;                  // Weekly S/D Lookback Bars
+input int               InpD1LookbackBars     = 35;                  // Daily S/D Lookback Bars
 
-input group "=== 3. Intraday Execution Scanning (H4 -> H1 -> M30 -> M15) ==="
-input bool                 InpScanH4             = true;                 // Scan H4 for Entry Confluence
-input bool                 InpScanH1             = true;                 // Scan H1 for Entry Confluence
-input bool                 InpScanM30            = true;                 // Scan M30 for Entry Confluence
-input bool                 InpScanM15            = true;                 // Scan M15 for Entry Confluence
-input double               InpMinWickPercent     = 55.0;                 // Minimum Rejection Wick % for Pin Bar
-input double               InpMaxBodyPercent     = 40.0;                 // Maximum Body % for Pin Bar
-input double               InpZoneProximityATR   = 0.50;                 // Max Distance to Key S/R Zone (x ATR)
+input group "=== 3. Volatility & Support/Resistance Filter ==="
+input bool              InpUseATRFilter       = true;                // Filter Out Low Volatility Dead Markets
+input int               InpATRPeriod          = 14;                  // ATR Period
+input int               InpATRSMAPeriod       = 50;                  // ATR Baseline SMA Period
+input double            InpMinATRFactor       = 0.70;                // Min ATR Factor (ATR14 >= 0.70 * SMA50)
+input bool              InpUseSRFilter        = true;                // Enable H4 S/R Clearance Filter
+input ENUM_TIMEFRAMES   InpSRTimeframe        = PERIOD_H4;           // Support/Resistance Timeframe (H4)
+input int               InpSRLookbackBars     = 80;                  // S/R Fractal Lookback Bars
+input double            InpMinDistanceSRDollars = 4.0;               // Min Distance to Opposing S/R (in Dollars, e.g. $4 on Gold)
 
-input group "=== 4. Risk & Target Management (Prop Firm Certified) ==="
-input ENUM_RISK_MODE       InpRiskMode           = RISK_PERCENT_EQUITY;  // Risk Sizing Mode
-input double               InpRiskPercent        = 1.0;                  // Risk Percent per Trade (%)
-input double               InpFixedLotSize       = 0.01;                 // Fixed Lot Size (if Fixed mode)
-input double               InpRR_TP1             = 1.5;                  // Target Risk-Reward TP1 (Partial Close 50%)
-input double               InpRR_TP2             = 2.5;                  // Target Risk-Reward TP2 (Runner Target)
-input double               InpSLBufferPoints     = 50.0;                 // Stop Loss Buffer Beyond Zone / Swing (Points)
-input bool                 InpMoveToBreakEven    = true;                 // Move Stop-Loss to Break-Even upon TP1
-input double               InpMaxDailyLossPct    = 4.5;                  // Daily Drawdown Circuit Breaker (% of Starting Equity)
+input group "=== 4. Risk & Target Management (R:R 1:1.5 - 1:2.0) ==="
+input ENUM_RISK_TYPE    InpRiskMode           = RISK_PERCENT;        // Risk Sizing Mode
+input double            InpRiskPercent        = 1.0;                 // Risk Percent per Trade (1.0%)
+input double            InpFixedLot           = 0.01;                // Fixed Lot Size
+input double            InpRR_Ratio           = 1.5;                 // Target Risk-to-Reward Ratio (1:1.5)
+input int               InpSL_LookbackBars    = 6;                   // Intraday SL Lookback Bars (Recent Extreme)
+input double            InpSLBufferDollars    = 1.5;                 // Stop Loss Buffer in Dollars ($1.5)
+input double            InpMinRiskDollars     = 3.5;                 // Min Risk Distance in Dollars ($3.5 on Gold)
+input double            InpMaxRiskDollars     = 18.0;                // Max Risk Distance in Dollars ($18.0 on Gold)
+input bool              InpEnablePartialTP    = true;                // Close 50% at 1:1.5 and Move to Breakeven
+input double            InpRunnerTP_RR        = 2.0;                 // Runner Target (1:2.0)
+input double            InpMaxSpreadPoints    = 500.0;               // Max Allowed Spread (Points)
 
-input group "=== 5. Visual Levels & Clean Chart Settings ==="
-input bool                 InpDrawCleanLevels    = true;                 // Draw Only Nearest 3 Active Levels Above/Below
-input color                InpResistanceColor    = clrTomato;            // Resistance / Flipped Resistance Color
-input color                InpSupportColor       = clrDodgerBlue;        // Support / Flipped Support Color
-input color                InpEntryLineColor     = clrGold;              // Planned Entry Color
-input color                InpSLLineColor        = clrCrimson;           // Planned Stop Loss Color
-input color                InpTPLineColor        = clrLimeGreen;         // Planned Take Profit Color
+input group "=== 5. Prop Firm Guardian ==="
+input double            InpMaxDailyLossPct    = 2.5;                 // Max Daily Drawdown Circuit Breaker (%)
+input bool              InpShowDashboard      = false;               // Show Visual Dashboard
+input bool              InpDebugLog           = false;               // Enable Verbose Diagnostics
 
-//--- GUI Button Names & Prefixes
-#define AGY_PREFIX          "AGY_CC_"
-#define BTN_ANALYZE_ID      "AGY_CC_BTN_ANALYZE"
-#define BTN_MODE_ID         "AGY_CC_BTN_MODE"
-#define BTN_EXECUTE_ID      "AGY_CC_BTN_EXEC"
-#define BTN_CLOSE_ID        "AGY_CC_BTN_CLOSE"
-
-//--- Global Engine Variables
+//--- Global Objects
 CTrade         m_trade;
 CPositionInfo  m_position;
 COrderInfo     m_order;
 CAccountInfo   m_account;
 
-ENUM_EXECUTION_MODE g_currentMode;
-int                 g_currentDayOfYear   = -1;
-int                 g_tradesTodayCount   = 0;
-double              g_dayStartEquity     = 0.0;
-bool                g_circuitBreaker     = false;
-datetime            g_lastProcessedBar   = 0;
-
-// Planned Setup Structure
-struct ActiveTradePlan
-{
-   bool              is_valid;
-   string            direction;         // "BUY", "SELL", "WAIT"
-   ENUM_TIMEFRAMES   trigger_tf;        // The intraday TF that triggered
-   string            trigger_reason;    // Description of confluence
-   double            entry_price;
-   double            stop_loss;
-   double            take_profit_1;
-   double            take_profit_2;
-   double            calculated_lot;
-   double            monetary_risk_usd;
-   double            risk_reward_ratio;
-};
-
-ActiveTradePlan g_activePlan;
-
-// Cascade State Structure
-struct CascadeState
-{
-   int    mn1_bias;         // 1 = Bullish, -1 = Bearish, 0 = Neutral
-   string mn1_desc;
-   int    w1_bias;          // 1 = Bullish, -1 = Bearish, 0 = Neutral
-   string w1_desc;
-   int    d1_bias;          // 1 = Bullish, -1 = Bearish, 0 = Neutral
-   string d1_desc;
-   string macro_verdict;    // "STRICT SELL ONLY", "STRICT BUY ONLY", "WAIT CONFLUENCE"
-   string status_message;
-};
-
-CascadeState g_cascade;
-
-// Forward Declarations
-void RunFullTopDownCascade();
-void AnalyzeTimeframe(ENUM_TIMEFRAMES tf, int &bias, string &desc, double &swingHigh, double &swingLow);
-bool CheckIntradayTrigger(ENUM_TIMEFRAMES tf, int macroBias, double &entry, double &sl, double &tp1, double &tp2, string &reason);
-double CalculateDynamicLot(double slDistancePoints);
-void ManageOpenTrades();
-void CreateChartUI();
-void DestroyChartUI();
-void UpdateUIButtons();
-void UpdateChartHUD();
-void ExecutePlannedOrder();
-void CloseAllPositions();
-void DrawCleanRays(double &nearestRes[], double &nearestSup[]);
-void ClearVisualDrawings();
-void DrawRay(string name, double price, color clr, ENUM_LINE_STYLE style, int width, string desc);
+int            h_fractals_sr = INVALID_HANDLE;
+int            h_atr_m15     = INVALID_HANDLE;
+int            h_ema20       = INVALID_HANDLE;
+datetime       g_lastExecBarTime = 0;
+int            g_tradesTodayCount = 0;
+int            g_currentDayOfYear = -1;
+double         g_dayStartEquity   = 0.0;
+bool           g_dailyCircuitBreaker = false;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -144,35 +94,37 @@ void DrawRay(string name, double price, color clr, ENUM_LINE_STYLE style, int wi
 int OnInit()
 {
    m_trade.SetExpertMagicNumber(InpMagicNumber);
-   m_trade.SetDeviationInPoints(20);
+   m_trade.SetDeviationInPoints(25);
    m_trade.SetTypeFillingBySymbol(_Symbol);
 
-   g_currentMode        = InpExecutionMode;
-   g_currentDayOfYear   = -1;
-   g_tradesTodayCount   = 0;
-   g_dayStartEquity     = AccountInfoDouble(ACCOUNT_EQUITY);
-   g_circuitBreaker     = false;
-   g_lastProcessedBar   = 0;
+   g_dayStartEquity   = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_currentDayOfYear = -1;
+   g_tradesTodayCount = 0;
+   g_dailyCircuitBreaker = false;
 
-   ZeroMemory(g_activePlan);
-   g_activePlan.direction = "WAIT";
+   // Initialize Fractals for H4 S/R clearance
+   if(InpUseSRFilter)
+   {
+      h_fractals_sr = iFractals(_Symbol, InpSRTimeframe);
+      if(h_fractals_sr == INVALID_HANDLE)
+         Print("Warning: Failed to create iFractals handle on ", EnumToString(InpSRTimeframe));
+   }
 
-   // Build UI buttons on chart
-   CreateChartUI();
+   // Initialize ATR
+   if(InpUseATRFilter)
+   {
+      h_atr_m15 = iATR(_Symbol, InpExecTF, InpATRPeriod);
+      if(h_atr_m15 == INVALID_HANDLE)
+         Print("Warning: Failed to create iATR handle on ", EnumToString(InpExecTF));
+   }
 
-   // Run initial top-down analysis
-   RunFullTopDownCascade();
+   // Initialize EMA20 for Dynamic Value & Pullback Filter
+   h_ema20 = iMA(_Symbol, InpExecTF, 20, 0, MODE_EMA, PRICE_CLOSE);
+   if(h_ema20 == INVALID_HANDLE)
+      Print("Warning: Failed to create iMA handle on ", EnumToString(InpExecTF));
 
-   // Set fast timer for responsive UI and position trailing
-   EventSetTimer(1);
-
-   PrintFormat("==================================================================");
-   PrintFormat(" [UNIVERSAL CANDLE CASCADE EA] Initialized on %s", _Symbol);
-   PrintFormat(" Mode: %s | Magic: %d | Risk: %.1f%% | Max Daily Loss: %.1f%%",
-               (g_currentMode == MODE_FULL_AUTOMATIC ? "FULL AUTOMATIC" : "MANUAL / SEMI-AUTO"),
-               InpMagicNumber, InpRiskPercent, InpMaxDailyLossPct);
-   PrintFormat("==================================================================");
-
+   PrintFormat("PRO CANDLE CASCADE v3.0 Initialized | Symbol: %s | ExecTF: %s | Hours: %d-%d | R:R: %.1f",
+               _Symbol, EnumToString(InpExecTF), InpStartHour, InpEndHour, InpRR_Ratio);
    return INIT_SUCCEEDED;
 }
 
@@ -181,54 +133,24 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   EventKillTimer();
-   DestroyChartUI();
-   ClearVisualDrawings();
-   Comment("");
+   if(h_fractals_sr != INVALID_HANDLE) IndicatorRelease(h_fractals_sr);
+   if(h_atr_m15 != INVALID_HANDLE) IndicatorRelease(h_atr_m15);
+   if(h_ema20 != INVALID_HANDLE) IndicatorRelease(h_ema20);
 }
 
 //+------------------------------------------------------------------+
-//| OnTick function                                                  |
+//| Daily Session & Loss Circuit Breaker                             |
 //+------------------------------------------------------------------+
-void OnTick()
+void CheckDailyReset()
 {
-   // 1. Manage Active Open Trades (Partial TP at 1:1.5 + Breakeven move)
-   ManageOpenTrades();
-
-   // 2. Check if a new bar formed on execution timeframe (M15)
-   datetime currentBarTime = iTime(_Symbol, PERIOD_M15, 0);
-   if(currentBarTime != g_lastProcessedBar)
-   {
-      g_lastProcessedBar = currentBarTime;
-
-      // Run full top-down cascade analysis on bar close
-      RunFullTopDownCascade();
-
-      // If full auto-trade mode is active and we have a valid setup
-      if(g_currentMode == MODE_FULL_AUTOMATIC && g_activePlan.is_valid && !g_circuitBreaker)
-      {
-         if(g_tradesTodayCount < InpMaxTradesPerDay)
-         {
-            ExecutePlannedOrder();
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| OnTimer function (Periodic UI refresh & Breakeven checks)        |
-//+------------------------------------------------------------------+
-void OnTimer()
-{
-   // Check Daily Circuit Breaker
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    if(dt.day_of_year != g_currentDayOfYear)
    {
-      g_currentDayOfYear = dt.day_of_year;
-      g_tradesTodayCount = 0;
-      g_dayStartEquity   = AccountInfoDouble(ACCOUNT_EQUITY);
-      g_circuitBreaker   = false;
+      g_currentDayOfYear    = dt.day_of_year;
+      g_tradesTodayCount    = 0;
+      g_dayStartEquity      = AccountInfoDouble(ACCOUNT_EQUITY);
+      g_dailyCircuitBreaker = false;
    }
 
    double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -237,366 +159,98 @@ void OnTimer()
       double lossPct = (g_dayStartEquity - currentEquity) / g_dayStartEquity * 100.0;
       if(lossPct >= InpMaxDailyLossPct)
       {
-         if(!g_circuitBreaker)
+         if(!g_dailyCircuitBreaker)
          {
-            PrintFormat("PROPFIRM CIRCUIT BREAKER ACTIVATED! Loss: %.2f%% >= Limit: %.2f%%",
+            PrintFormat("PRO CANDLE CASCADE: Daily Loss Circuit Breaker Triggered! Loss: %.2f%% >= Limit: %.2f%%",
                         lossPct, InpMaxDailyLossPct);
-            g_circuitBreaker = true;
+            g_dailyCircuitBreaker = true;
          }
       }
    }
-
-   // Manage open positions continuously
-   ManageOpenTrades();
-
-   // Update HUD & Buttons
-   UpdateUIButtons();
-   UpdateChartHUD();
 }
 
 //+------------------------------------------------------------------+
-//| Chart Event Handler (Interactive Button Clicks)                  |
+//| Real-time Deal History Loss Counter (Prop Firm Trade Guardian)   |
 //+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+int GetDailyRealizedLosses()
 {
-   if(id == CHARTEVENT_OBJECT_CLICK)
+   datetime dayStart = iTime(_Symbol, PERIOD_D1, 0);
+   if(dayStart <= 0) return 0;
+
+   if(!HistorySelect(dayStart, TimeCurrent()))
+      return 0;
+
+   int totalDeals = HistoryDealsTotal();
+   int losses = 0;
+
+   for(int i = 0; i < totalDeals; i++)
    {
-      // 1. Analyze Button
-      if(sparam == BTN_ANALYZE_ID)
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket > 0)
       {
-         ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_STATE, false);
-         RunFullTopDownCascade();
-         ChartRedraw(0);
-      }
-      // 2. Mode Toggle Button (Semi-Auto vs Full-Auto)
-      else if(sparam == BTN_MODE_ID)
-      {
-         ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_STATE, false);
-         g_currentMode = (g_currentMode == MODE_MANUAL_SEMI_AUTO) ? MODE_FULL_AUTOMATIC : MODE_MANUAL_SEMI_AUTO;
-         UpdateUIButtons();
-         ChartRedraw(0);
-      }
-      // 3. Execute Setup Button (One-Click Execution)
-      else if(sparam == BTN_EXECUTE_ID)
-      {
-         ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_STATE, false);
-         if(g_activePlan.is_valid)
+         long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+         long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+         string sym = HistoryDealGetString(ticket, DEAL_SYMBOL);
+
+         if(entry == DEAL_ENTRY_OUT && magic == InpMagicNumber && sym == _Symbol)
          {
-            ExecutePlannedOrder();
-         }
-         else
-         {
-            Alert("No Grade-A Confluence setup currently active to execute!");
-         }
-         ChartRedraw(0);
-      }
-      // 4. Close All Button
-      else if(sparam == BTN_CLOSE_ID)
-      {
-         ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_STATE, false);
-         CloseAllPositions();
-         ChartRedraw(0);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| CORE TOP-DOWN CASCADE ENGINE                                     |
-//+------------------------------------------------------------------+
-void RunFullTopDownCascade()
-{
-   // Reset Plan
-   ZeroMemory(g_activePlan);
-   g_activePlan.direction = "WAIT";
-
-   // ---------------------------------------------------------------
-   // STEP 1: MONTHLY (MN1) MACRO ANALYSIS
-   // ---------------------------------------------------------------
-   double mnHigh = 0.0, mnLow = 0.0;
-   AnalyzeTimeframe(PERIOD_MN1, g_cascade.mn1_bias, g_cascade.mn1_desc, mnHigh, mnLow);
-
-   // ---------------------------------------------------------------
-   // STEP 2: WEEKLY (W1) CANDLE BIAS & EXPECTATION
-   // ---------------------------------------------------------------
-   double wHigh = 0.0, wLow = 0.0;
-   AnalyzeTimeframe(PERIOD_W1, g_cascade.w1_bias, g_cascade.w1_desc, wHigh, wLow);
-
-   // ---------------------------------------------------------------
-   // STEP 3: DAILY (D1) YESTERDAY'S CANDLE & TODAY'S EXPANSION BIAS
-   // ---------------------------------------------------------------
-   double dHigh = 0.0, dLow = 0.0;
-   AnalyzeTimeframe(PERIOD_D1, g_cascade.d1_bias, g_cascade.d1_desc, dHigh, dLow);
-
-   // ---------------------------------------------------------------
-   // STEP 4: CASCADE ALIGNMENT VERDICT (The Trader's Core Law)
-   // ---------------------------------------------------------------
-   int macroDirection = 0; // 1 = Buy Only, -1 = Sell Only, 0 = Wait
-
-   // --- Case A: Bearish Cascade (SELL ONLY) ---
-   // "لو الاسبوعي هابط (مثلاً شمعة ابتلاعية هابطة) فا المتوقع شمعة الاسبوع الجاية هابطة
-   // فا بالتالي علي الفريم اليومي هدور علي فرص بيع فقط علشان تخلقلنا شمعة الاسبوع اللي متوقعينها"
-   if(g_cascade.w1_bias == -1 && g_cascade.d1_bias == -1 && (g_cascade.mn1_bias != 1 || !InpRequireMN1Filter))
-   {
-      macroDirection = -1;
-      g_cascade.macro_verdict = "STRICT SELL ONLY (W1 + D1 Aligned Bearish)";
-   }
-   // --- Case B: Bullish Cascade (BUY ONLY) ---
-   else if(g_cascade.w1_bias == 1 && g_cascade.d1_bias == 1 && (g_cascade.mn1_bias != -1 || !InpRequireMN1Filter))
-   {
-      macroDirection = 1;
-      g_cascade.macro_verdict = "STRICT BUY ONLY (W1 + D1 Aligned Bullish)";
-   }
-   else
-   {
-      macroDirection = 0;
-      g_cascade.macro_verdict = "WAIT (Conflict Between Weekly & Daily Expectations)";
-   }
-
-   // ---------------------------------------------------------------
-   // STEP 5: INTRADAY SCANNING (H4 -> H1 -> M30 -> M15)
-   // "لو عمل برايس اكشن هابط علي اليومي، انزل علي الـ 4 ساعات و الساعة و النص ساعة
-   // ادور علي فرصة بيع وادخل بيع علي حسب ظهور الفرصة"
-   // ---------------------------------------------------------------
-   if(macroDirection != 0 && !g_circuitBreaker)
-   {
-      ENUM_TIMEFRAMES scanList[4] = { PERIOD_H4, PERIOD_H1, PERIOD_M30, PERIOD_M15 };
-      bool scanEnables[4]         = { InpScanH4, InpScanH1, InpScanM30, InpScanM15 };
-
-      for(int i = 0; i < 4; i++)
-      {
-         if(!scanEnables[i]) continue;
-
-         double entry = 0.0, sl = 0.0, tp1 = 0.0, tp2 = 0.0;
-         string reason = "";
-
-         if(CheckIntradayTrigger(scanList[i], macroDirection, entry, sl, tp1, tp2, reason))
-         {
-            g_activePlan.is_valid          = true;
-            g_activePlan.direction         = (macroDirection == 1) ? "BUY" : "SELL";
-            g_activePlan.trigger_tf        = scanList[i];
-            g_activePlan.trigger_reason    = reason;
-            g_activePlan.entry_price       = entry;
-            g_activePlan.stop_loss         = sl;
-            g_activePlan.take_profit_1     = tp1;
-            g_activePlan.take_profit_2     = tp2;
-            g_activePlan.risk_reward_ratio = InpRR_TP1;
-
-            double slPoints = MathAbs(entry - sl) / _Point;
-            g_activePlan.calculated_lot    = CalculateDynamicLot(slPoints);
-            g_activePlan.monetary_risk_usd = AccountInfoDouble(ACCOUNT_EQUITY) * (InpRiskPercent / 100.0);
-
-            if(InpEnableSound) PlaySound("expert.wav");
-            break; // Stop at highest confirming timeframe
+            double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            if(profit < -0.01)
+               losses++;
          }
       }
    }
-
-   // ---------------------------------------------------------------
-   // STEP 6: DRAW CLEAN LEVELS & TRADE BLUEPRINT ON CHART
-   // ---------------------------------------------------------------
-   if(InpDrawCleanLevels)
-   {
-      ClearVisualDrawings();
-
-      double resLevels[3] = {0,0,0};
-      double supLevels[3] = {0,0,0};
-      // Populate nearest D1/H4 levels
-      resLevels[0] = dHigh;
-      resLevels[1] = wHigh;
-      supLevels[0] = dLow;
-      supLevels[1] = wLow;
-
-      DrawCleanRays(resLevels, supLevels);
-
-      // If active plan exists, draw Blueprint
-      if(g_activePlan.is_valid)
-      {
-         DrawRay(AGY_PREFIX + "BP_ENTRY", g_activePlan.entry_price, InpEntryLineColor, STYLE_SOLID, 2, 
-                 StringFormat("ENTRY (%s @ %.5f)", g_activePlan.direction, g_activePlan.entry_price));
-         DrawRay(AGY_PREFIX + "BP_SL", g_activePlan.stop_loss, InpSLLineColor, STYLE_SOLID, 2, 
-                 StringFormat("STOP LOSS (%.5f)", g_activePlan.stop_loss));
-         DrawRay(AGY_PREFIX + "BP_TP1", g_activePlan.take_profit_1, InpTPLineColor, STYLE_SOLID, 2, 
-                 StringFormat("TP 1 (1:%.1f | %.5f)", InpRR_TP1, g_activePlan.take_profit_1));
-         DrawRay(AGY_PREFIX + "BP_TP2", g_activePlan.take_profit_2, clrMediumSeaGreen, STYLE_DOT, 1, 
-                 StringFormat("TP 2 (1:%.1f | %.5f)", InpRR_TP2, g_activePlan.take_profit_2));
-      }
-   }
+   return losses;
 }
 
 //+------------------------------------------------------------------+
-//| Analyze Timeframe Candle & Geometry                              |
+//| Check ATR Volatility Filter                                      |
 //+------------------------------------------------------------------+
-void AnalyzeTimeframe(ENUM_TIMEFRAMES tf, int &bias, string &desc, double &swingHigh, double &swingLow)
+bool IsVolatilitySufficient()
 {
-   bias = 0;
-   desc = "Neutral";
-   swingHigh = 0.0;
-   swingLow  = 0.0;
+   if(!InpUseATRFilter || h_atr_m15 == INVALID_HANDLE) return true;
 
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   int copied = CopyRates(_Symbol, tf, 0, MathMax(InpSwingLookbackBars, 15), rates);
-   if(copied < 5) return;
+   double atrBuf[];
+   ArraySetAsSeries(atrBuf, true);
+   int copied = CopyBuffer(h_atr_m15, 0, 1, InpATRSMAPeriod + 5, atrBuf);
+   if(copied < InpATRSMAPeriod) return true;
 
-   // Swings over lookback
-   swingHigh = rates[1].high;
-   swingLow  = rates[1].low;
-   for(int i = 1; i < copied; i++)
-   {
-      if(rates[i].high > swingHigh) swingHigh = rates[i].high;
-      if(rates[i].low < swingLow)   swingLow  = rates[i].low;
-   }
+   double currentATR = atrBuf[0];
+   double sumATR = 0.0;
+   for(int i = 0; i < InpATRSMAPeriod; i++)
+      sumATR += atrBuf[i];
+   double smaATR = sumATR / (double)InpATRSMAPeriod;
 
-   // Candle [1] geometry
-   double range     = rates[1].high - rates[1].low;
-   double body      = MathAbs(rates[1].close - rates[1].open);
-   double upperWick = rates[1].high - MathMax(rates[1].open, rates[1].close);
-   double lowerWick = MathMin(rates[1].open, rates[1].close) - rates[1].low;
+   if(smaATR > 0.0 && currentATR < (smaATR * InpMinATRFactor))
+      return false; // Dead volatility / Low momentum compression
 
-   bool isBearish = rates[1].close < rates[1].open;
-   bool isBullish = rates[1].close > rates[1].open;
-
-   // 1. Engulfing Detection
-   bool bearEngulf = isBearish && (rates[2].close > rates[2].open) && 
-                     (rates[1].open >= rates[2].close) && (rates[1].close <= rates[2].open);
-
-   bool bullEngulf = isBullish && (rates[2].close < rates[2].open) && 
-                     (rates[1].open <= rates[2].close) && (rates[1].close >= rates[2].open);
-
-   // 2. Pin Bar Detection
-   bool bearPin = (range > 0) && ((upperWick / range) >= (InpMinWickPercent / 100.0)) && 
-                  ((body / range) <= (InpMaxBodyPercent / 100.0)) && (rates[1].close <= rates[1].low + (range * 0.45));
-
-   bool bullPin = (range > 0) && ((lowerWick / range) >= (InpMinWickPercent / 100.0)) && 
-                  ((body / range) <= (InpMaxBodyPercent / 100.0)) && (rates[1].close >= rates[1].low + (range * 0.55));
-
-   // Synthesize Expectation
-   if(bearEngulf)
-   {
-      bias = -1;
-      desc = "Bearish Engulfing (Reversal / Continuation Down)";
-   }
-   else if(bearPin)
-   {
-      bias = -1;
-      desc = "Bearish Pin Bar (Strong Rejection of Highs)";
-   }
-   else if(bullEngulf)
-   {
-      bias = 1;
-      desc = "Bullish Engulfing (Reversal / Continuation Up)";
-   }
-   else if(bullPin)
-   {
-      bias = 1;
-      desc = "Bullish Pin Bar (Strong Rejection of Lows)";
-   }
-   else if(isBearish && body >= (range * 0.55))
-   {
-      bias = -1;
-      desc = "Bearish Momentum Expansion";
-   }
-   else if(isBullish && body >= (range * 0.55))
-   {
-      bias = 1;
-      desc = "Bullish Momentum Expansion";
-   }
-   else
-   {
-      bias = 0;
-      desc = "Consolidation / Indecision";
-   }
+   return true;
 }
 
 //+------------------------------------------------------------------+
-//| Check Intraday Trigger on Given Timeframe                        |
+//| Calculate Lot Size Based on Structural Stop Loss Risk            |
 //+------------------------------------------------------------------+
-bool CheckIntradayTrigger(ENUM_TIMEFRAMES tf, int macroBias, double &entry, double &sl, double &tp1, double &tp2, string &reason)
+double CalculateLotSize(double slDistanceDollars)
 {
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   if(CopyRates(_Symbol, tf, 0, 10, rates) < 5) return false;
+   if(InpRiskMode == RISK_FIXED)
+      return InpFixedLot;
 
-   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   long   stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   double minStopDist = (stopsLevel + 5) * _Point;
+   if(slDistanceDollars <= 0) return InpFixedLot;
 
-   // Intraday candle [1] geometry
-   double range     = rates[1].high - rates[1].low;
-   double body      = MathAbs(rates[1].close - rates[1].open);
-   double upperWick = rates[1].high - MathMax(rates[1].open, rates[1].close);
-   double lowerWick = MathMin(rates[1].open, rates[1].close) - rates[1].low;
-
-   bool isBearish = rates[1].close < rates[1].open;
-   bool isBullish = rates[1].close > rates[1].open;
-
-   bool bearPin = (range > 0) && ((upperWick / range) >= (InpMinWickPercent / 100.0)) && 
-                  ((body / range) <= (InpMaxBodyPercent / 100.0));
-   bool bullPin = (range > 0) && ((lowerWick / range) >= (InpMinWickPercent / 100.0)) && 
-                  ((body / range) <= (InpMaxBodyPercent / 100.0));
-
-   bool bearEngulf = isBearish && (rates[2].close > rates[2].open) && (rates[1].close < rates[2].low);
-   bool bullEngulf = isBullish && (rates[2].close < rates[2].open) && (rates[1].close > rates[2].high);
-
-   // --- SELL TRIGGER ---
-   if(macroBias == -1)
-   {
-      if(bearPin || bearEngulf || (isBearish && rates[0].close < rates[1].low))
-      {
-         entry = currentBid;
-         sl    = rates[1].high + (InpSLBufferPoints * _Point);
-         if(sl - entry < minStopDist) sl = entry + minStopDist;
-
-         double riskDist = sl - entry;
-         tp1   = entry - (riskDist * InpRR_TP1);
-         tp2   = entry - (riskDist * InpRR_TP2);
-         reason = StringFormat("%s Trigger: %s", EnumToString(tf), bearPin ? "Pin Bar" : (bearEngulf ? "Engulfing" : "Breakdown"));
-         return true;
-      }
-   }
-   // --- BUY TRIGGER ---
-   else if(macroBias == 1)
-   {
-      if(bullPin || bullEngulf || (isBullish && rates[0].close > rates[1].high))
-      {
-         entry = currentAsk;
-         sl    = rates[1].low - (InpSLBufferPoints * _Point);
-         if(entry - sl < minStopDist) sl = entry - minStopDist;
-
-         double riskDist = entry - sl;
-         tp1   = entry + (riskDist * InpRR_TP1);
-         tp2   = entry + (riskDist * InpRR_TP2);
-         reason = StringFormat("%s Trigger: %s", EnumToString(tf), bullPin ? "Pin Bar" : (bullEngulf ? "Engulfing" : "Breakout"));
-         return true;
-      }
-   }
-
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| Calculate Dynamic Institutional Lot Size                         |
-//+------------------------------------------------------------------+
-double CalculateDynamicLot(double slDistancePoints)
-{
-   if(InpRiskMode == RISK_FIXED_LOT)
-      return InpFixedLotSize;
-
-   if(slDistancePoints <= 0) return InpFixedLotSize;
-
-   double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double riskAmount = equity * (InpRiskPercent / 100.0);
 
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double point     = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
-   if(tickSize <= 0 || point <= 0 || tickValue <= 0)
-      return InpFixedLotSize;
+   if(tickSize <= 0 || tickValue <= 0)
+      return InpFixedLot;
 
-   double pointValue = tickValue * (point / tickSize);
-   double rawLots    = riskAmount / (slDistancePoints * pointValue);
+   // 1 standard lot moves (slDistanceDollars / tickSize) * tickValue
+   double dollarPerLot = (slDistanceDollars / tickSize) * tickValue;
+   if(dollarPerLot <= 0) return InpFixedLot;
+
+   double rawLots = riskAmount / dollarPerLot;
 
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
@@ -606,50 +260,209 @@ double CalculateDynamicLot(double slDistancePoints)
       rawLots = MathFloor(rawLots / stepLot) * stepLot;
 
    rawLots = MathMax(minLot, MathMin(maxLot, rawLots));
-   return NormalizeDouble(rawLots, 2);
+   return rawLots;
 }
 
 //+------------------------------------------------------------------+
-//| Execute Planned Order (Market Entry)                             |
+//| Detect Supply and Demand Zones on High Timeframe (W1 or D1)     |
 //+------------------------------------------------------------------+
-void ExecutePlannedOrder()
+void GetHTFSupplyDemandZones(ENUM_TIMEFRAMES tf, int lookback, 
+                             double &recentSupplyTop, double &recentSupplyBot,
+                             double &recentDemandTop, double &recentDemandBot)
 {
-   if(!g_activePlan.is_valid) return;
+   recentSupplyTop = 99999999.0;
+   recentSupplyBot = 99999999.0;
+   recentDemandTop = 0.0;
+   recentDemandBot = 0.0;
 
-   // Check spread
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(spread > InpMaxSpreadPoints)
-   {
-      PrintFormat("Trade Rejected: Spread (%d pts) exceeds max allowed (%d pts)", spread, (int)InpMaxSpreadPoints);
-      return;
-   }
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(_Symbol, tf, 1, lookback, rates);
+   if(copied < 5) return;
 
-   if(g_activePlan.direction == "BUY")
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // Find nearest swing high above current price (Supply Zone)
+   for(int i = 2; i < copied - 2; i++)
    {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      if(m_trade.Buy(g_activePlan.calculated_lot, _Symbol, ask, g_activePlan.stop_loss, g_activePlan.take_profit_2, "Cascade BUY"))
+      if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high &&
+         rates[i].high > rates[i-2].high && rates[i].high > rates[i+2].high)
       {
-         g_tradesTodayCount++;
-         PrintFormat("EXECUTION SUCCESS: Opened BUY %.2f Lots @ %.5f | SL: %.5f | TP: %.5f",
-                     g_activePlan.calculated_lot, ask, g_activePlan.stop_loss, g_activePlan.take_profit_2);
+         if(rates[i].high > currentBid && rates[i].high < recentSupplyTop)
+         {
+            recentSupplyTop = rates[i].high;
+            recentSupplyBot = MathMin(rates[i].open, rates[i].close);
+         }
       }
    }
-   else if(g_activePlan.direction == "SELL")
+
+   // Find nearest swing low below current price (Demand Zone)
+   for(int i = 2; i < copied - 2; i++)
    {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(m_trade.Sell(g_activePlan.calculated_lot, _Symbol, bid, g_activePlan.stop_loss, g_activePlan.take_profit_2, "Cascade SELL"))
+      if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low &&
+         rates[i].low < rates[i-2].low && rates[i].low < rates[i+2].low)
       {
-         g_tradesTodayCount++;
-         PrintFormat("EXECUTION SUCCESS: Opened SELL %.2f Lots @ %.5f | SL: %.5f | TP: %.5f",
-                     g_activePlan.calculated_lot, bid, g_activePlan.stop_loss, g_activePlan.take_profit_2);
+         if(rates[i].low < currentBid && rates[i].low > recentDemandBot)
+         {
+            recentDemandBot = rates[i].low;
+            recentDemandTop = MathMax(rates[i].open, rates[i].close);
+         }
       }
    }
 }
 
 //+------------------------------------------------------------------+
-//| Manage Open Positions (Partial TP at 1:1.5 + Breakeven Move)     |
+//| Evaluate Weekly (W1) Bias using Supply/Demand + Price Action     |
 //+------------------------------------------------------------------+
-void ManageOpenTrades()
+void EvaluateWeeklyBias(bool &w1_bull, bool &w1_bear)
+{
+   w1_bull = false;
+   w1_bear = false;
+
+   MqlRates w_rates[];
+   ArraySetAsSeries(w_rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_W1, 1, 10, w_rates);
+   if(copied < 2) return;
+
+   double w_close = w_rates[0].close;
+   double w_open  = w_rates[0].open;
+   double w_high  = w_rates[0].high;
+   double w_low   = w_rates[0].low;
+   double w_rng   = w_high - w_low;
+
+   double w_sup_top, w_sup_bot, w_dem_top, w_dem_bot;
+   GetHTFSupplyDemandZones(PERIOD_W1, InpW1LookbackBars, w_sup_top, w_sup_bot, w_dem_top, w_dem_bot);
+
+   bool testedSupply = (w_high >= w_sup_bot && w_close < w_sup_top);
+   bool testedDemand = (w_low <= w_dem_top && w_close > w_dem_bot);
+
+   bool w_bull_close  = (w_close > w_open);
+   bool w_bear_close  = (w_close < w_open);
+   bool w_bull_engulf = (w_close > w_open && w_close > w_rates[1].high);
+   bool w_bear_engulf = (w_close < w_open && w_close < w_rates[1].low);
+
+   bool w_shooting_star = (w_rng > 0 && (w_high - MathMax(w_open, w_close)) >= (0.45 * w_rng));
+   bool w_hammer        = (w_rng > 0 && (MathMin(w_open, w_close) - w_low) >= (0.45 * w_rng));
+
+   if(InpUseSupplyDemandBias && testedSupply && (w_bear_close || w_shooting_star))
+   {
+      w1_bear = true; // Weekly rejected Supply Zone
+   }
+   else if(InpUseSupplyDemandBias && testedDemand && (w_bull_close || w_hammer))
+   {
+      w1_bull = true; // Weekly bounced from Demand Zone
+   }
+   else
+   {
+      // Trend continuation & Candlestick Price Action
+      if(w_bull_engulf || (w_bull_close && !w_shooting_star))
+         w1_bull = true;
+      if(w_bear_engulf || (w_bear_close && !w_hammer))
+         w1_bear = true;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Evaluate Daily (D1) Confirmation using S/D + Price Action        |
+//+------------------------------------------------------------------+
+void EvaluateDailyBias(bool &d1_bull, bool &d1_bear)
+{
+   d1_bull = false;
+   d1_bear = false;
+
+   MqlRates d_rates[];
+   ArraySetAsSeries(d_rates, true);
+   int copied = CopyRates(_Symbol, PERIOD_D1, 1, 15, d_rates);
+   if(copied < 3) return;
+
+   double d_close = d_rates[0].close;
+   double d_open  = d_rates[0].open;
+   double d_high  = d_rates[0].high;
+   double d_low   = d_rates[0].low;
+   double d_rng   = d_high - d_low;
+
+   double p_high  = d_rates[1].high;
+   double p_low   = d_rates[1].low;
+
+   double d_sup_top, d_sup_bot, d_dem_top, d_dem_bot;
+   GetHTFSupplyDemandZones(PERIOD_D1, InpD1LookbackBars, d_sup_top, d_sup_bot, d_dem_top, d_dem_bot);
+
+   bool testedDailySupply = (d_high >= d_sup_bot && d_close < d_sup_top);
+   bool testedDailyDemand = (d_low <= d_dem_top && d_close > d_dem_bot);
+
+   bool d_bull_close  = (d_close > d_open);
+   bool d_bear_close  = (d_close < d_open);
+   bool d_bull_engulf = (d_close > d_open && d_close > p_high);
+   bool d_bear_engulf = (d_close < d_open && d_close < p_low);
+
+   bool d_shooting_star = (d_rng > 0 && (d_high - MathMax(d_open, d_close)) >= (0.45 * d_rng));
+   bool d_hammer        = (d_rng > 0 && (MathMin(d_open, d_close) - d_low) >= (0.45 * d_rng));
+
+   if(InpUseSupplyDemandBias && testedDailySupply && (d_bear_close || d_shooting_star))
+   {
+      d1_bear = true;
+   }
+   else if(InpUseSupplyDemandBias && testedDailyDemand && (d_bull_close || d_hammer))
+   {
+      d1_bull = true;
+   }
+   else
+   {
+      if(d_bull_engulf || (d_bull_close && !d_shooting_star))
+         d1_bull = true;
+      if(d_bear_engulf || (d_bear_close && !d_hammer))
+         d1_bear = true;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Find Nearest H4 Fractal Support and Resistance Levels            |
+//+------------------------------------------------------------------+
+void GetNearestSR(double &nearestResistance, double &nearestSupport)
+{
+   nearestResistance = 99999999.0;
+   nearestSupport    = 0.0;
+
+   if(h_fractals_sr == INVALID_HANDLE) return;
+
+   double upBuf[], lowBuf[];
+   ArraySetAsSeries(upBuf, true);
+   ArraySetAsSeries(lowBuf, true);
+
+   int copiedUp  = CopyBuffer(h_fractals_sr, 0, 1, InpSRLookbackBars, upBuf);
+   int copiedLow = CopyBuffer(h_fractals_sr, 1, 1, InpSRLookbackBars, lowBuf);
+
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   if(copiedUp > 0)
+   {
+      for(int i = 0; i < copiedUp; i++)
+      {
+         if(upBuf[i] != EMPTY_VALUE && upBuf[i] > currentPrice)
+         {
+            if(upBuf[i] < nearestResistance)
+               nearestResistance = upBuf[i];
+         }
+      }
+   }
+
+   if(copiedLow > 0)
+   {
+      for(int i = 0; i < copiedLow; i++)
+      {
+         if(lowBuf[i] != EMPTY_VALUE && lowBuf[i] < currentPrice)
+         {
+            if(lowBuf[i] > nearestSupport)
+               nearestSupport = lowBuf[i];
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Manage Open Positions (Partial TP at 1:1.5 + Move to Breakeven)  |
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -664,61 +477,64 @@ void ManageOpenTrades()
             ulong ticket     = m_position.Ticket();
 
             if(openPrice <= 0 || slPrice <= 0) continue;
+
             double riskDist = MathAbs(openPrice - slPrice);
             if(riskDist <= 0) continue;
 
-            // --- BUY POSITION ---
+            // Check BUY position
             if(posType == POSITION_TYPE_BUY)
             {
                double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-               double targetTP1  = openPrice + (riskDist * InpRR_TP1);
+               double targetTP1  = openPrice + (riskDist * InpRR_Ratio);
 
-               // When price reaches TP1: move SL to BE and close 50%
-               if(currentBid >= targetTP1 && slPrice < openPrice)
+               // Partial TP trigger: price reached TP1 (1:1.5) and SL not yet at breakeven
+               if(InpEnablePartialTP && currentBid >= targetTP1 && slPrice < openPrice)
                {
-                  if(InpMoveToBreakEven)
-                  {
-                     m_trade.PositionModify(ticket, openPrice, m_position.TakeProfit());
-                     PrintFormat("Position #%d moved to BREAK-EVEN at %.5f", ticket, openPrice);
-                  }
-
-                  // Partial close 50%
                   double halfLot = NormalizeDouble(volume * 0.5, 2);
                   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
                   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
                   if(stepLot > 0) halfLot = MathFloor(halfLot / stepLot) * stepLot;
 
-                  if(halfLot >= minLot && volume > halfLot)
+                  if(halfLot >= minLot && (volume - halfLot) >= minLot)
                   {
                      m_trade.PositionClosePartial(ticket, halfLot);
-                     PrintFormat("Position #%d: Partial Close 50% (%.2f lots) at TP1", ticket, halfLot);
+                     PrintFormat("PRO CANDLE CASCADE: Partial Close 50% (%.2f lots) at TP1 (%.2f) on #%d",
+                                 halfLot, targetTP1, ticket);
                   }
+
+                  // Move SL to Breakeven + 20 points
+                  double beSL = openPrice + (20.0 * _Point);
+                  double runnerTP = openPrice + (riskDist * InpRunnerTP_RR);
+                  m_trade.PositionModify(ticket, beSL, runnerTP);
+                  PrintFormat("PRO CANDLE CASCADE: Moved SL to Breakeven (%.2f) on #%d", beSL, ticket);
                }
             }
-            // --- SELL POSITION ---
+            // Check SELL position
             else if(posType == POSITION_TYPE_SELL)
             {
                double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-               double targetTP1  = openPrice - (riskDist * InpRR_TP1);
+               double targetTP1  = openPrice - (riskDist * InpRR_Ratio);
 
-               if(currentAsk <= targetTP1 && slPrice > openPrice)
+               // Partial TP trigger: price reached TP1 (1:1.5) and SL not yet at breakeven
+               if(InpEnablePartialTP && currentAsk <= targetTP1 && slPrice > openPrice)
                {
-                  if(InpMoveToBreakEven)
-                  {
-                     m_trade.PositionModify(ticket, openPrice, m_position.TakeProfit());
-                     PrintFormat("Position #%d moved to BREAK-EVEN at %.5f", ticket, openPrice);
-                  }
-
                   double halfLot = NormalizeDouble(volume * 0.5, 2);
                   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
                   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
                   if(stepLot > 0) halfLot = MathFloor(halfLot / stepLot) * stepLot;
 
-                  if(halfLot >= minLot && volume > halfLot)
+                  if(halfLot >= minLot && (volume - halfLot) >= minLot)
                   {
                      m_trade.PositionClosePartial(ticket, halfLot);
-                     PrintFormat("Position #%d: Partial Close 50% (%.2f lots) at TP1", ticket, halfLot);
+                     PrintFormat("PRO CANDLE CASCADE: Partial Close 50% (%.2f lots) at TP1 (%.2f) on #%d",
+                                 halfLot, targetTP1, ticket);
                   }
+
+                  // Move SL to Breakeven - 20 points
+                  double beSL = openPrice - (20.0 * _Point);
+                  double runnerTP = openPrice - (riskDist * InpRunnerTP_RR);
+                  m_trade.PositionModify(ticket, beSL, runnerTP);
+                  PrintFormat("PRO CANDLE CASCADE: Moved SL to Breakeven (%.2f) on #%d", beSL, ticket);
                }
             }
          }
@@ -727,208 +543,180 @@ void ManageOpenTrades()
 }
 
 //+------------------------------------------------------------------+
-//| Close All Positions for this Symbol & Magic                      |
+//| Count Open Positions and Pending Orders                          |
 //+------------------------------------------------------------------+
-void CloseAllPositions()
+int CountTotalPositions()
 {
+   int count = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(m_position.SelectByIndex(i))
       {
          if(m_position.Symbol() == _Symbol && m_position.Magic() == InpMagicNumber)
-         {
-            m_trade.PositionClose(m_position.Ticket());
-         }
+            count++;
       }
    }
-   Print("All open positions closed.");
-}
-
-//+------------------------------------------------------------------+
-//| GUI: Create Interactive On-Chart Controls                        |
-//+------------------------------------------------------------------+
-void CreateChartUI()
-{
-   int x = 20;
-   int y = 30;
-
-   // 1. Analyze Button
-   ObjectDelete(0, BTN_ANALYZE_ID);
-   ObjectCreate(0, BTN_ANALYZE_ID, OBJ_BUTTON, 0, 0, 0);
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_XSIZE, 130);
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_YSIZE, 26);
-   ObjectSetString(0, BTN_ANALYZE_ID, OBJPROP_TEXT, "🚀 ANALYZE MTF");
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, BTN_ANALYZE_ID, OBJPROP_BGCOLOR, C'20,80,120');
-
-   // 2. Mode Toggle Button
-   ObjectDelete(0, BTN_MODE_ID);
-   ObjectCreate(0, BTN_MODE_ID, OBJ_BUTTON, 0, 0, 0);
-   ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_XDISTANCE, x + 138);
-   ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_XSIZE, 130);
-   ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_YSIZE, 26);
-   ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_COLOR, clrWhite);
-
-   // 3. Execute Setup Button
-   ObjectDelete(0, BTN_EXECUTE_ID);
-   ObjectCreate(0, BTN_EXECUTE_ID, OBJ_BUTTON, 0, 0, 0);
-   ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_XDISTANCE, x + 276);
-   ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_XSIZE, 140);
-   ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_YSIZE, 26);
-   ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_COLOR, clrWhite);
-
-   // 4. Close All Button
-   ObjectDelete(0, BTN_CLOSE_ID);
-   ObjectCreate(0, BTN_CLOSE_ID, OBJ_BUTTON, 0, 0, 0);
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_XDISTANCE, x + 424);
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_XSIZE, 100);
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_YSIZE, 26);
-   ObjectSetString(0, BTN_CLOSE_ID, OBJPROP_TEXT, "🛑 CLOSE ALL");
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, BTN_CLOSE_ID, OBJPROP_BGCOLOR, C'100,30,30');
-
-   UpdateUIButtons();
-   ChartRedraw(0);
-}
-
-void DestroyChartUI()
-{
-   ObjectDelete(0, BTN_ANALYZE_ID);
-   ObjectDelete(0, BTN_MODE_ID);
-   ObjectDelete(0, BTN_EXECUTE_ID);
-   ObjectDelete(0, BTN_CLOSE_ID);
-}
-
-void UpdateUIButtons()
-{
-   // Update Mode button text & color
-   if(g_currentMode == MODE_FULL_AUTOMATIC)
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
-      ObjectSetString(0, BTN_MODE_ID, OBJPROP_TEXT, "🤖 AUTO: ON");
-      ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_BGCOLOR, C'20,110,50');
-   }
-   else
-   {
-      ObjectSetString(0, BTN_MODE_ID, OBJPROP_TEXT, "✋ SEMI-AUTO");
-      ObjectSetInteger(0, BTN_MODE_ID, OBJPROP_BGCOLOR, C'90,70,20');
-   }
-
-   // Update Execute button text & color
-   if(g_activePlan.is_valid)
-   {
-      ObjectSetString(0, BTN_EXECUTE_ID, OBJPROP_TEXT, StringFormat("⚡ EXECUTE %s", g_activePlan.direction));
-      ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_BGCOLOR, (g_activePlan.direction == "BUY") ? C'0,120,60' : C'140,20,20');
-   }
-   else
-   {
-      ObjectSetString(0, BTN_EXECUTE_ID, OBJPROP_TEXT, "⏳ WAITING SETUP");
-      ObjectSetInteger(0, BTN_EXECUTE_ID, OBJPROP_BGCOLOR, C'50,50,50');
-   }
-}
-
-//+------------------------------------------------------------------+
-//| GUI: Comprehensive On-Chart Comment HUD                          |
-//+------------------------------------------------------------------+
-void UpdateChartHUD()
-{
-   string hud = "\n\n\n\n"
-              + "====================================================================\n"
-              + StringFormat("  [CANDLE CASCADE AI EXPERT - %s (%s)]\n", _Symbol, EnumToString(_Period))
-              + "====================================================================\n"
-              + StringFormat("  1. MONTHLY (MN1)  : %s [%s]\n", 
-                             (g_cascade.mn1_bias == 1 ? "BULLISH" : (g_cascade.mn1_bias == -1 ? "BEARISH" : "NEUTRAL")), g_cascade.mn1_desc)
-              + StringFormat("  2. WEEKLY  (W1)   : %s [%s]\n", 
-                             (g_cascade.w1_bias == 1 ? "BULLISH" : (g_cascade.w1_bias == -1 ? "BEARISH" : "NEUTRAL")), g_cascade.w1_desc)
-              + StringFormat("  3. DAILY   (D1)   : %s [%s]\n", 
-                             (g_cascade.d1_bias == 1 ? "BULLISH" : (g_cascade.d1_bias == -1 ? "BEARISH" : "NEUTRAL")), g_cascade.d1_desc)
-              + "--------------------------------------------------------------------\n"
-              + StringFormat("  CASCADE VERDICT   : %s\n", g_cascade.macro_verdict)
-              + "--------------------------------------------------------------------\n";
-
-   if(g_activePlan.is_valid)
-   {
-      hud += StringFormat("  ACTIVE SETUP      : %s TRIGGERED ON %s\n", g_activePlan.direction, EnumToString(g_activePlan.trigger_tf))
-           + StringFormat("  TRIGGER REASON    : %s\n", g_activePlan.trigger_reason)
-           + StringFormat("  PLANNED ENTRY     : %.5f\n", g_activePlan.entry_price)
-           + StringFormat("  STOP LOSS         : %.5f\n", g_activePlan.stop_loss)
-           + StringFormat("  TARGET 1 (1:%.1f)  : %.5f (Close 50%% + Move to BE)\n", InpRR_TP1, g_activePlan.take_profit_1)
-           + StringFormat("  TARGET 2 (1:%.1f)  : %.5f (Runner)\n", InpRR_TP2, g_activePlan.take_profit_2)
-           + StringFormat("  RECOMMENDED LOTS  : %.2f Lots (Risk: $%.2f | 1.0%%)\n", g_activePlan.calculated_lot, g_activePlan.monetary_risk_usd);
-   }
-   else
-   {
-      hud += "  ACTIVE SETUP      : NO GRADE-A CONFLUENCE (SCANNING INTRADAY TF)...\n";
-   }
-
-   hud += "--------------------------------------------------------------------\n"
-        + StringFormat("  PROP FIRM GUARD   : Daily Loss: %.2f%% / Limit: %.2f%% | Trades Today: %d/%d\n",
-                       (g_dayStartEquity > 0 ? (g_dayStartEquity - AccountInfoDouble(ACCOUNT_EQUITY))/g_dayStartEquity * 100.0 : 0.0),
-                       InpMaxDailyLossPct, g_tradesTodayCount, InpMaxTradesPerDay)
-        + StringFormat("  EXECUTION STATUS  : %s%s\n", 
-                       (g_currentMode == MODE_FULL_AUTOMATIC ? "AUTO-TRADING ACTIVE" : "SEMI-AUTO (Use Click Button)"),
-                       (g_circuitBreaker ? " [CIRCUIT BREAKER LOCKOUT]" : ""))
-        + "====================================================================";
-
-   Comment(hud);
-}
-
-//+------------------------------------------------------------------+
-//| Chart Visuals: Draw Clean Rays                                   |
-//+------------------------------------------------------------------+
-void DrawCleanRays(double &nearestRes[], double &nearestSup[])
-{
-   for(int i = 0; i < 2; i++)
-   {
-      if(nearestRes[i] > 0)
+      if(m_order.SelectByIndex(i))
       {
-         string name = StringFormat("%sRES_%d", AGY_PREFIX, i);
-         DrawRay(name, nearestRes[i], InpResistanceColor, STYLE_DASH, 1, StringFormat("Macro Resistance %.5f", nearestRes[i]));
-      }
-      if(nearestSup[i] > 0)
-      {
-         string name = StringFormat("%sSUP_%d", AGY_PREFIX, i);
-         DrawRay(name, nearestSup[i], InpSupportColor, STYLE_DASH, 1, StringFormat("Macro Support %.5f", nearestSup[i]));
+         if(m_order.Symbol() == _Symbol && m_order.Magic() == InpMagicNumber)
+            count++;
       }
    }
+   return count;
 }
 
-void DrawRay(string name, double price, color clr, ENUM_LINE_STYLE style, int width, string desc)
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
 {
-   ObjectDelete(0, name);
-   datetime t_start = iTime(_Symbol, _Period, MathMin(iBars(_Symbol, _Period) - 1, 35));
-   datetime t_end   = TimeCurrent() + (PeriodSeconds(_Period) * 15);
+   // 1. Daily Reset & Circuit Breaker Check
+   CheckDailyReset();
 
-   if(ObjectCreate(0, name, OBJ_TREND, 0, t_start, price, t_end, price))
+   // 2. Active Trade Management
+   ManageOpenPositions();
+
+   if(g_dailyCircuitBreaker) return;
+
+   // 3. New Bar Check on Execution TF
+   datetime currentExecTime = iTime(_Symbol, InpExecTF, 0);
+   if(currentExecTime == g_lastExecBarTime) return;
+   g_lastExecBarTime = currentExecTime;
+
+   // 4. Session Timing Filter (NY Open to late afternoon 13:00 - 21:00)
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(dt.hour < InpStartHour || dt.hour >= InpEndHour || dt.hour == 12) return;
+   if(dt.day_of_week == 5 && dt.hour >= 20) return; // Friday gap protection
+
+   // Max daily trades limit
+   if(g_tradesTodayCount >= InpMaxTradesPerDay) return;
+
+   // Prop Firm Trade Guardian: Stop trading today if realized loss >= limit
+   if(InpMaxDailyLosses > 0 && GetDailyRealizedLosses() >= InpMaxDailyLosses)
+      return;
+
+   // If already in an active position, do not open another
+   if(CountTotalPositions() > 0) return;
+
+   // Volatility regime filter
+   if(!IsVolatilitySufficient()) return;
+
+   // Spread Protection
+   double spread = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(InpMaxSpreadPoints > 0 && spread > InpMaxSpreadPoints) return;
+
+   // 5. Gather Multi-Timeframe Alignment & Daily Bias
+   bool w1_bull = false, w1_bear = false;
+   bool d1_bull = false, d1_bear = false;
+   EvaluateWeeklyBias(w1_bull, w1_bear);
+   EvaluateDailyBias(d1_bull, d1_bear);
+
+   bool bias_buy  = (!InpRequireW1Confluence || w1_bull) && (!InpRequireD1Confluence || d1_bull);
+   bool bias_sell = (!InpRequireW1Confluence || w1_bear) && (!InpRequireD1Confluence || d1_bear);
+
+   // Today's Open Price
+   MqlRates rates_d1_curr[];
+   ArraySetAsSeries(rates_d1_curr, true);
+   if(CopyRates(_Symbol, PERIOD_D1, 0, 1, rates_d1_curr) < 1) return;
+   double today_open = rates_d1_curr[0].open;
+
+   // Intraday Execution Bar (Last completed M15 bar)
+   int checkBars = InpSL_LookbackBars + 2;
+   MqlRates rates_exec[];
+   ArraySetAsSeries(rates_exec, true);
+   int c_exec = CopyRates(_Symbol, InpExecTF, 1, checkBars, rates_exec);
+   if(c_exec < checkBars) return;
+
+   double c_sig = rates_exec[0].close;
+   double o_sig = rates_exec[0].open;
+
+   // Intraday recent extreme (last N bars)
+   double rec_high = rates_exec[0].high;
+   double rec_low  = rates_exec[0].low;
+   for(int k = 1; k < InpSL_LookbackBars; k++)
    {
-      ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, style);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
-      ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
-      ObjectSetString(0, name, OBJPROP_TEXT, desc);
-      ObjectSetString(0, name, OBJPROP_TOOLTIP, desc);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      if(rates_exec[k].high > rec_high) rec_high = rates_exec[k].high;
+      if(rates_exec[k].low < rec_low)   rec_low  = rates_exec[k].low;
    }
-}
 
-void ClearVisualDrawings()
-{
-   int total = ObjectsTotal(0, 0, -1);
-   for(int i = total - 1; i >= 0; i--)
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   // Confluence Assessment (System & Entry conditions are identical!)
+   bool today_exp_buy  = (!InpRequireTodayExp) || (currentAsk > today_open);
+   bool today_exp_sell = (!InpRequireTodayExp) || (currentBid < today_open);
+
+   // Dynamic Value EMA20 Filter (Must pull back to near value, not chase extended tops)
+   double emaBuf[];
+   ArraySetAsSeries(emaBuf, true);
+   double emaVal = 0.0;
+   if(h_ema20 != INVALID_HANDLE && CopyBuffer(h_ema20, 0, 1, 1, emaBuf) > 0)
+      emaVal = emaBuf[0];
+
+   bool pullBackBuy  = (emaVal > 0.0) ? (c_sig > emaVal && rec_low <= (emaVal + 4.5)) : true;
+   bool pullBackSell = (emaVal > 0.0) ? (c_sig < emaVal && rec_high >= (emaVal - 4.5)) : true;
+
+   bool setup_buy  = bias_buy  && today_exp_buy  && (c_sig > o_sig) && pullBackBuy;
+   bool setup_sell = bias_sell && today_exp_sell && (c_sig < o_sig) && pullBackSell;
+
+   // 6. Major Support and Resistance Clearance Filter
+   double nearestRes = 0.0, nearestSup = 0.0;
+   if(InpUseSRFilter)
    {
-      string name = ObjectName(0, i, 0, -1);
-      if(StringFind(name, AGY_PREFIX) == 0 && StringFind(name, "BTN_") < 0)
+      GetNearestSR(nearestRes, nearestSup);
+      if(setup_buy && (nearestRes - currentAsk) < InpMinDistanceSRDollars)
+         setup_buy = false;
+      if(setup_sell && (currentBid - nearestSup) < InpMinDistanceSRDollars)
+         setup_sell = false;
+   }
+
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minStopDist = (stopsLevel + 5) * _Point;
+
+   // 7. Execute Orders with Precise Intraday Structural SL
+   // --- BUY SETUP ---
+   if(setup_buy && !setup_sell)
+   {
+      double slPrice = rec_low - InpSLBufferDollars;
+      if(currentAsk - slPrice < minStopDist) slPrice = currentAsk - minStopDist;
+
+      double riskDistDollars = currentAsk - slPrice;
+      if(riskDistDollars < InpMinRiskDollars || riskDistDollars > InpMaxRiskDollars)
+         return;
+
+      double targetRR = InpEnablePartialTP ? InpRunnerTP_RR : InpRR_Ratio;
+      double tpPrice  = currentAsk + (riskDistDollars * targetRR);
+
+      double lot = CalculateLotSize(riskDistDollars);
+      if(m_trade.Buy(lot, _Symbol, currentAsk, slPrice, tpPrice, "CASCADE Buy"))
       {
-         ObjectDelete(0, name);
+         g_tradesTodayCount++;
+         PrintFormat("PRO CANDLE CASCADE: Executed BUY at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lots: %.2f",
+                     currentAsk, slPrice, riskDistDollars, tpPrice, lot);
+      }
+   }
+   // --- SELL SETUP ---
+   else if(setup_sell && !setup_buy)
+   {
+      double slPrice = rec_high + InpSLBufferDollars;
+      if(slPrice - currentBid < minStopDist) slPrice = currentBid + minStopDist;
+
+      double riskDistDollars = slPrice - currentBid;
+      if(riskDistDollars < InpMinRiskDollars || riskDistDollars > InpMaxRiskDollars)
+         return;
+
+      double targetRR = InpEnablePartialTP ? InpRunnerTP_RR : InpRR_Ratio;
+      double tpPrice  = currentBid - (riskDistDollars * targetRR);
+
+      double lot = CalculateLotSize(riskDistDollars);
+      if(m_trade.Sell(lot, _Symbol, currentBid, slPrice, tpPrice, "CASCADE Sell"))
+      {
+         g_tradesTodayCount++;
+         PrintFormat("PRO CANDLE CASCADE: Executed SELL at %.2f | SL: %.2f (Risk: $%.2f) | TP: %.2f | Lots: %.2f",
+                     currentBid, slPrice, riskDistDollars, tpPrice, lot);
       }
    }
 }
